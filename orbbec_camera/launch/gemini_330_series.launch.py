@@ -291,6 +291,8 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_sync_host_time', default_value='false'),
         DeclareLaunchArgument('time_sync_period', default_value='6.0'), # seconds
         DeclareLaunchArgument('time_domain', default_value='global'),# global, device, system
+        # SEAL: seconds added to every image stamp (capture instant).
+        DeclareLaunchArgument('stamp_offset_s', default_value='0.0'),
         DeclareLaunchArgument('timestamp_clock_type', default_value=''),# realtime or monotonic, default is realtime.
         DeclareLaunchArgument('enable_frame_drop_log', default_value='false'),
         DeclareLaunchArgument('frame_timestamp_csv_file', default_value=''),

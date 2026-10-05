@@ -1121,6 +1121,8 @@ class OBCameraNode {
   int min_depth_limit_ = 0;
   int max_depth_limit_ = 0;
   std::string time_domain_ = "global";  // device, system, global
+  // SEAL: added to every image stamp; see getFrameTimestampUs.
+  int64_t stamp_offset_us_ = 0;
   bool enable_frame_drop_log_ = false;
   std::string frame_timestamp_csv_file_;
   std::unique_ptr<TimestampCsvLogger> timestamp_csv_logger_;

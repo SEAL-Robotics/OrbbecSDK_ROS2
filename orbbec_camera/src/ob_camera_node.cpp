@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <stdexcept>
 #include <cstdlib>
 #include <queue>
 #include <unordered_map>
@@ -5055,6 +5056,14 @@ void OBCameraNode::getParameters() {
   setAndGetNodeParameter<std::string>(time_domain_, "time_domain", "global");
   time_domain_ = normalizeClosedSetParameterValue(logger_, "time_domain", time_domain_,
                                                   {"global", "device", "system"}, "global");
+  double stamp_offset_s = 0.0;
+  setAndGetNodeParameter<double>(stamp_offset_s, "stamp_offset_s", 0.0);
+  // SEAL: beyond this the stamps are in another time domain, which the clock
+  // setup must fix rather than a shift.
+  if (!(std::abs(stamp_offset_s) <= 0.5)) {
+    throw std::invalid_argument("stamp_offset_s must be finite and within 0.5 s");
+  }
+  stamp_offset_us_ = static_cast<int64_t>(std::llround(stamp_offset_s * 1e6));
   setAndGetNodeParameter<bool>(enable_frame_drop_log_, "enable_frame_drop_log", false);
   setAndGetNodeParameter<std::string>(frame_timestamp_csv_file_, "frame_timestamp_csv_file", "");
   setAndGetNodeParameter<std::string>(exposure_range_mode_, "exposure_range_mode", "");
@@ -6727,13 +6736,25 @@ uint64_t OBCameraNode::getFrameTimestampUs(const std::shared_ptr<ob::Frame> &fra
     RCLCPP_WARN(logger_, "getFrameTimestampUs: frame is nullptr, return 0");
     return 0;
   }
+  uint64_t stamp_us = 0;
   if (time_domain_ == "device") {
-    return frame->getTimeStampUs();
+    stamp_us = frame->getTimeStampUs();
   } else if (time_domain_ == "global") {
-    return frame->getGlobalTimeStampUs();
+    stamp_us = frame->getGlobalTimeStampUs();
   } else {
-    return frame->getSystemTimeStampUs();
+    stamp_us = frame->getSystemTimeStampUs();
   }
+  // SEAL: image stamps name the instant the frame was taken. Every video
+  // stream gets the same shift, so a frameset's colour and depth stay paired;
+  // IMU samples keep their own.
+  const auto type = frame->getType();
+  if (stamp_offset_us_ == 0 || type == OB_FRAME_ACCEL || type == OB_FRAME_GYRO) {
+    return stamp_us;
+  }
+  if (stamp_offset_us_ < 0 && stamp_us < static_cast<uint64_t>(-stamp_offset_us_)) {
+    return stamp_us;
+  }
+  return static_cast<uint64_t>(static_cast<int64_t>(stamp_us) + stamp_offset_us_);
 }
 void OBCameraNode::onNewFrameSetCallback(std::shared_ptr<ob::FrameSet> frame_set) {
   if (!is_running_.load()) {
