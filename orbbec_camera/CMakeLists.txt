@@ -12,8 +12,9 @@ option(USE_NV_HW_DECODER "Use Nvidia hardware decoder" OFF)
 option(INSTALL_UDEV_RULES "Install udev rule for Orbbec cameras" ON)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    add_compile_options(-Wall -Wextra -Werror -Wno-pedantic -Wno-array-bounds)
-    add_compile_options(-Wno-error=deprecated-declarations)
+    # Host languages only: nvcc rejects these spellings.
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-Wall;-Wextra;-Werror;-Wno-pedantic;-Wno-array-bounds>")
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-Wno-error=deprecated-declarations>")
     add_link_options("-Wl,-z,relro,-z,now,-z,defs")
 endif()
 
@@ -236,6 +237,75 @@ if(USE_NV_HW_DECODER)
     )
 endif()
 
+# GPU image pipeline (SEAL): the colour and depth post-processing the SDK
+# would run on the CPU. The CPU references always build; the CUDA stages when
+# a CUDA compiler is found, and the NVJPG codec when the Jetson Multimedia
+# API is installed as well.
+option(ORBBEC_GPU_PIPELINE "Build the CUDA stages of the GPU image pipeline if CUDA is found" ON)
+set(ORBBEC_GPU_SOURCES
+  src/gpu/image_metrics.cpp
+  src/gpu/pipelines.cpp
+  src/gpu/sdk_algorithms.cpp
+  src/gpu/sdk_tables.cpp
+)
+# Whether the per-pixel alignment fuses a multiply and an add follows the
+# SDK's build for this architecture, not the compiler's choice.
+set_source_files_properties(src/gpu/sdk_algorithms.cpp PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
+set(ORBBEC_GPU_DEFINITIONS)
+if(HOST_PLATFORM STREQUAL "arm64")
+    list(APPEND ORBBEC_GPU_DEFINITIONS ORBBEC_SDK_FUSED_MULTIPLY_ADD)
+endif()
+set(ORBBEC_GPU_LIBRARIES ${OpenCV_LIBS})
+set(ORBBEC_WITH_CUDA OFF)
+set(ORBBEC_WITH_NVJPG OFF)
+if(ORBBEC_GPU_PIPELINE)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+            if(HOST_PLATFORM STREQUAL "arm64")
+                set(CMAKE_CUDA_ARCHITECTURES 87)
+            else()
+                set(CMAKE_CUDA_ARCHITECTURES native)
+            endif()
+        endif()
+        set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
+        set(CMAKE_CUDA_STANDARD 17)
+        enable_language(CUDA)
+        find_package(CUDAToolkit REQUIRED)
+        set(ORBBEC_WITH_CUDA ON)
+        list(APPEND ORBBEC_GPU_SOURCES src/gpu/cuda_stages.cu)
+        list(APPEND ORBBEC_GPU_DEFINITIONS ORBBEC_WITH_CUDA)
+        list(APPEND ORBBEC_GPU_LIBRARIES CUDA::cudart)
+    endif()
+endif()
+set(ORBBEC_MMAPI_DIR /usr/src/jetson_multimedia_api)
+if(ORBBEC_WITH_CUDA AND EXISTS ${ORBBEC_MMAPI_DIR}/include/nvbufsurface.h)
+    file(GLOB ORBBEC_MMAPI_LIBJPEG_DIR LIST_DIRECTORIES true ${ORBBEC_MMAPI_DIR}/include/libjpeg-*)
+    set(ORBBEC_TEGRA_LIB_DIRS /usr/lib/aarch64-linux-gnu/nvidia /usr/lib/aarch64-linux-gnu/tegra)
+    find_library(ORBBEC_NVBUFSURFACE_LIBRARY nvbufsurface PATHS ${ORBBEC_TEGRA_LIB_DIRS} NO_DEFAULT_PATH)
+    find_library(ORBBEC_EGL_LIBRARY EGL)
+    if(ORBBEC_MMAPI_LIBJPEG_DIR AND ORBBEC_NVBUFSURFACE_LIBRARY AND ORBBEC_EGL_LIBRARY)
+        set(ORBBEC_WITH_NVJPG ON)
+        list(APPEND ORBBEC_GPU_SOURCES src/gpu/nv_jpeg.cpp)
+        # libjpeg 9's headers for this file alone: everything else in the
+        # package sees the system libjpeg's.
+        set_source_files_properties(src/gpu/nv_jpeg.cpp PROPERTIES
+            INCLUDE_DIRECTORIES "${ORBBEC_MMAPI_DIR}/include;${ORBBEC_MMAPI_LIBJPEG_DIR}")
+        list(APPEND ORBBEC_GPU_DEFINITIONS ORBBEC_WITH_NVJPG)
+        # libnvmm_jpeg itself is opened at run time (nv_jpeg.cpp says why).
+        list(APPEND ORBBEC_GPU_LIBRARIES ${ORBBEC_NVBUFSURFACE_LIBRARY} ${ORBBEC_EGL_LIBRARY}
+             CUDA::cuda_driver dl)
+    endif()
+endif()
+message(STATUS "Orbbec GPU pipeline: CUDA ${ORBBEC_WITH_CUDA}, NVJPG ${ORBBEC_WITH_NVJPG}")
+add_library(orbbec_gpu_pipeline STATIC ${ORBBEC_GPU_SOURCES})
+set_target_properties(orbbec_gpu_pipeline PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(orbbec_gpu_pipeline PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> ${ORBBEC_INCLUDE_DIR} ${OpenCV_INCLUDE_DIRS})
+target_compile_definitions(orbbec_gpu_pipeline PUBLIC ${ORBBEC_GPU_DEFINITIONS})
+target_link_libraries(orbbec_gpu_pipeline PUBLIC ${ORBBEC_GPU_LIBRARIES})
+
 macro(add_orbbec_executable TARGET SOURCE)
     add_executable(${TARGET} ${SOURCE})
     target_include_directories(${TARGET} PUBLIC ${COMMON_INCLUDE_DIRS})
@@ -271,6 +341,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC ${COMMON_INCLUDE_DIRS} ${image
 target_link_directories(${PROJECT_NAME} PRIVATE ${ORBBEC_LIBS_DIR})
 target_link_libraries(${PROJECT_NAME}
     ${OpenCV_LIBS}
+    orbbec_gpu_pipeline
     ${orbbec_camera_msgs_TARGETS}
     ${std_srvs_TARGETS}
     ament_index_cpp::ament_index_cpp
@@ -446,6 +517,22 @@ if(BUILD_TESTING)
     ament_add_gtest(camera_info_distortion_test test/camera_info_distortion_test.cpp)
     target_link_directories(camera_info_distortion_test PRIVATE ${ORBBEC_LIBS_DIR})
     target_link_libraries(camera_info_distortion_test ${PROJECT_NAME})
+
+    ament_add_gtest(gpu_sdk_algorithms_test test/gpu/test_sdk_algorithms.cpp)
+    target_link_directories(gpu_sdk_algorithms_test PRIVATE ${ORBBEC_LIBS_DIR})
+    target_link_libraries(gpu_sdk_algorithms_test orbbec_gpu_pipeline OrbbecSDK)
+    find_package(JPEG REQUIRED)
+    ament_add_gtest(gpu_pipelines_test test/gpu/test_pipelines.cpp TIMEOUT 120)
+    target_link_libraries(gpu_pipelines_test orbbec_gpu_pipeline JPEG::JPEG)
+    ament_add_gtest(gpu_color_math_test test/gpu/test_color_math.cpp)
+    target_link_libraries(gpu_color_math_test orbbec_gpu_pipeline JPEG::JPEG)
+    ament_add_gtest(gpu_benchmark_test test/gpu/test_benchmark.cpp TIMEOUT 300)
+    target_link_directories(gpu_benchmark_test PRIVATE ${ORBBEC_LIBS_DIR})
+    target_link_libraries(gpu_benchmark_test orbbec_gpu_pipeline OrbbecSDK JPEG::JPEG)
+    if(ORBBEC_WITH_CUDA)
+        ament_add_gtest(gpu_cuda_stages_test test/gpu/test_cuda_stages.cpp TIMEOUT 120)
+        target_link_libraries(gpu_cuda_stages_test orbbec_gpu_pipeline)
+    endif()
 endif()
 
 ament_export_include_directories(include)
