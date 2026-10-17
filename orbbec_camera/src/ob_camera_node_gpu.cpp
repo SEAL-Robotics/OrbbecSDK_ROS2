@@ -4,6 +4,8 @@
 // deciding which stages run on the GPU, feeding them, and the driver's own
 // JPEG of the rectified colour on color/image_raw/compressed.
 
+#include <algorithm>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -65,17 +67,50 @@ void OBCameraNode::createGpuPipeline() {
                                 "filter and the GPU pipeline leaves it alone");
     options.speckle_filter = false;
     gpu_speckle_filter_active_ = false;
+    // setupDevices turned the SDK's filter off for the GPU; depth is never
+    // left unfiltered.
+    setSdkNoiseRemovalFilter(enable_noise_removal_filter_);
   }
   gpu_ = std::make_unique<GpuImagePipeline>(node_, options);
 }
 
-bool OBCameraNode::applyNoiseRemovalToGpu(bool enabled, int min_diff, int max_size) {
+void OBCameraNode::setSdkNoiseRemovalFilter(bool enabled) {
+  TRY_EXECUTE_BLOCK({
+    if (device_->isPropertySupported(OB_PROP_DEPTH_SOFT_FILTER_BOOL, OB_PERMISSION_READ_WRITE)) {
+      device_->setBoolProperty(OB_PROP_DEPTH_SOFT_FILTER_BOOL, enabled);
+    }
+  });
+}
+
+bool OBCameraNode::applyNoiseRemovalToGpu(bool enabled, int min_diff, int max_size,
+                                          std::string *error) {
   if (!gpu_ || !gpu_speckle_filter_active_) {
     return false;
   }
-  if (device_->isPropertySupported(OB_PROP_DEPTH_SOFT_FILTER_BOOL, OB_PERMISSION_READ_WRITE)) {
-    device_->setBoolProperty(OB_PROP_DEPTH_SOFT_FILTER_BOOL, false);
+  // The device's own ranges for the parameters, as its setter would enforce.
+  auto check = [&](OBPropertyID id, int value, const char *name) {
+    OBIntPropertyRange range{};
+    range.min = 0;
+    range.max = std::numeric_limits<int>::max();
+    TRY_EXECUTE_BLOCK({
+      if (device_->isPropertySupported(id, OB_PERMISSION_READ)) {
+        range = device_->getIntPropertyRange(id);
+      }
+    });
+    if (value < std::max(0, range.min) || value > range.max) {
+      *error = std::string("noise removal filter ") + name + " " + std::to_string(value) +
+               " is out of range [" + std::to_string(std::max(0, range.min)) + "," +
+               std::to_string(range.max) + "]";
+      return false;
+    }
+    return true;
+  };
+  if (!check(OB_PROP_DEPTH_MAX_DIFF_INT, min_diff, "min_diff") ||
+      !check(OB_PROP_DEPTH_MAX_SPECKLE_SIZE_INT, max_size, "max_size")) {
+    RCLCPP_ERROR_STREAM(logger_, *error);
+    return true;
   }
+  setSdkNoiseRemovalFilter(false);
   gpu_->setSpeckle(enabled, min_diff, max_size);
   RCLCPP_INFO_STREAM(logger_, "GPU noise removal filter " << (enabled ? "on" : "off")
                                                          << ", min_diff " << min_diff
@@ -111,33 +146,43 @@ void OBCameraNode::processGpuColorFrameSet(const std::shared_ptr<ob::FrameSet> &
   if (!color_frame) {
     return;
   }
-  if (color_frame->getFormat() != OB_FORMAT_MJPG) {
-    RCLCPP_ERROR_STREAM_THROTTLE(logger_, *node_->get_clock(), 10000,
-                                 "The GPU colour path needs MJPG colour, the camera sends format "
-                                     << color_frame->getFormat());
-    return;
-  }
-  const bool colored_cloud = enable_colored_point_cloud_ && depth_registration_cloud_pub_ &&
-                             depth_registration_cloud_pub_->get_subscription_count() > 0;
-  const bool jpeg_wanted = hasCompressedImageSubscriber(COLOR);
-  const bool raw_wanted = colored_cloud || imageWanted(COLOR);
-  std::shared_ptr<ob::Frame> rectified;
-  std::vector<uint8_t> jpeg;
-  if (!gpu_->processColor(color_frame, raw_wanted, jpeg_wanted, &rectified, &jpeg)) {
-    // The failure is logged; the SDK's undistortion still gives the frame.
-    rectified = gpu_->sdkRectify(color_frame);
-    if (!rectified) {
+  if (color_frame->getFormat() == OB_FORMAT_MJPG) {
+    const bool colored_cloud = enable_colored_point_cloud_ && depth_registration_cloud_pub_ &&
+                               depth_registration_cloud_pub_->get_subscription_count() > 0;
+    const bool jpeg_wanted = hasCompressedImageSubscriber(COLOR);
+    const bool raw_wanted = colored_cloud || enable_d2c_viewer_ || imageWanted(COLOR);
+    std::shared_ptr<ob::Frame> rectified;
+    std::vector<uint8_t> jpeg;
+    if (gpu_->processColor(color_frame, raw_wanted, jpeg_wanted, &rectified, &jpeg)) {
+      frame_set->pushFrame(rectified);
+      is_color_frame_decoded_ = true;
+      if (jpeg_wanted && !jpeg.empty()) {
+        const auto timestamp = fromUsToROSTime(getFrameTimestampUs(rectified));
+        publishJpegColorImage(std::move(jpeg), COLOR, timestamp, optical_frame_id_[COLOR]);
+      }
+      color_jpeg_published_by_gpu_ = true;
+      onNewFrameCallback(rectified, COLOR);
+      color_jpeg_published_by_gpu_ = false;
       return;
     }
-    jpeg.clear();
+  } else {
+    RCLCPP_WARN_STREAM_ONCE(logger_, "The GPU colour path takes MJPG; the camera sends format "
+                                         << color_frame->getFormat()
+                                         << ", so the SDK undistorts colour");
+  }
+  // The SDK's undistortion, then the driver's usual decode and publish: what
+  // the colour thread does without the GPU pipeline.
+  auto rectified = gpu_->sdkRectify(color_frame);
+  if (!rectified) {
+    return;
   }
   frame_set->pushFrame(rectified);
-  is_color_frame_decoded_ = true;
-  if (jpeg_wanted && !jpeg.empty()) {
-    const auto timestamp = fromUsToROSTime(getFrameTimestampUs(rectified));
-    publishJpegColorImage(std::move(jpeg), COLOR, timestamp, optical_frame_id_[COLOR]);
-  }
-  onNewFrameCallback(rectified, COLOR);
+  processColorFrameSetOnSdk(rectified);
+}
+
+void OBCameraNode::processColorFrameSetOnSdk(const std::shared_ptr<ob::Frame> &frame) {
+  is_color_frame_decoded_ = decodeColorFrameToBuffer(frame, rgb_buffer_);
+  onNewFrameCallback(frame, COLOR);
 }
 
 void OBCameraNode::publishJpegColorImage(std::vector<uint8_t> jpeg,

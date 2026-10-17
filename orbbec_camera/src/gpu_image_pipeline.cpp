@@ -123,7 +123,13 @@ GpuImagePipeline::GpuImagePipeline(rclcpp::Node *node, const Options &options)
   }
 }
 
-GpuImagePipeline::~GpuImagePipeline() = default;
+GpuImagePipeline::~GpuImagePipeline() {
+  // The timer's callback holds this object.
+  if (summary_timer_) {
+    summary_timer_->cancel();
+    summary_timer_.reset();
+  }
+}
 
 void GpuImagePipeline::logFailure(const char *stage, const std::string &error) {
   RCLCPP_ERROR_STREAM_THROTTLE(logger_, *node_->get_clock(), 5000,
@@ -142,6 +148,7 @@ void GpuImagePipeline::setSpeckle(bool enabled, int max_diff, int max_size) {
 void GpuImagePipeline::startDepthFrame() {
   compare_depth_now_ = options_.compare && depth_frames_ % options_.compare_every_n == 0;
   ++depth_frames_;
+  compare_sdk_filtered_.reset();
 }
 
 void GpuImagePipeline::ensureDepthPipeline() {
@@ -164,6 +171,11 @@ std::shared_ptr<ob::Frame> GpuImagePipeline::filterDepth(const std::shared_ptr<o
     return nullptr;
   }
   auto filtered = ob::FrameFactory::createFrameFromOtherFrame(raw, false);
+  if (raw->getDataSize() < pixels * sizeof(uint16_t) ||
+      filtered->getDataSize() < pixels * sizeof(uint16_t)) {
+    logFailure("speckle filter", "depth frame buffer is smaller than its resolution");
+    return nullptr;
+  }
   uint16_t *out = reinterpret_cast<uint16_t *>(filtered->getData());
   if (!data_wanted && !compare_depth_now_) {
     std::memset(out, 0, pixels * sizeof(uint16_t));
@@ -213,6 +225,19 @@ bool GpuImagePipeline::ensureDepthConfig(const std::shared_ptr<ob::Frame> &depth
     return false;
   }
   aligned_profile_ = sdk_aligned->getStreamProfile();
+  {
+    auto aligned_video = sdk_aligned->as<ob::VideoFrame>();
+    if (aligned_video->getWidth() != static_cast<uint32_t>(config.color_intrinsic.width) ||
+        aligned_video->getHeight() != static_cast<uint32_t>(config.color_intrinsic.height) ||
+        depth_profile->getWidth() != static_cast<uint32_t>(config.depth_intrinsic.width) ||
+        depth_profile->getHeight() != static_cast<uint32_t>(config.depth_intrinsic.height)) {
+      logFailure("depth alignment", "the intrinsics are not for the streams' resolutions");
+      aligned_profile_.reset();
+      return false;
+    }
+    aligned_bytes_ = static_cast<size_t>(config.color_intrinsic.width) *
+                     config.color_intrinsic.height * sizeof(uint16_t);
+  }
 
   // The SDK drops raw depth at or above the frame's maximum valid value,
   // which it does not expose: find it by aligning constant frames.
@@ -269,12 +294,18 @@ std::shared_ptr<ob::Frame> GpuImagePipeline::alignDepth(const std::shared_ptr<ob
     return nullptr;
   }
   auto aligned = frameFromProfile(aligned_profile_, depth);
+  auto video = depth->as<ob::VideoFrame>();
+  if (aligned->getDataSize() < aligned_bytes_ ||
+      depth->getDataSize() <
+          static_cast<size_t>(video->getWidth()) * video->getHeight() * sizeof(uint16_t)) {
+    logFailure("depth alignment", "a frame buffer is smaller than its resolution");
+    return nullptr;
+  }
   auto *out = reinterpret_cast<uint16_t *>(aligned->getData());
   if (!data_wanted && !compare_now) {
     std::memset(out, 0, aligned->getDataSize());
     return aligned;
   }
-  auto video = depth->as<ob::VideoFrame>();
   std::string error;
   if (!depth_->process(reinterpret_cast<const uint16_t *>(depth->getData()),
                        static_cast<int>(video->getWidth()), static_cast<int>(video->getHeight()),
@@ -406,6 +437,12 @@ bool GpuImagePipeline::ensureColorConfig(const std::shared_ptr<ob::Frame> &mjpg)
     return false;
   }
   rectified_profile_ = sdk->getStreamProfile();
+  rectified_bytes_ = static_cast<size_t>(intrinsic.width) * intrinsic.height * 3;
+  if (sdk->getFormat() != OB_FORMAT_RGB || sdk->getDataSize() < rectified_bytes_) {
+    logFailure("colour", "the SDK's undistortion does not give RGB of the stream's size");
+    rectified_profile_.reset();
+    return false;
+  }
   std::string error;
   if (!color_->configure(gpu::buildUndistortLut(intrinsic, distortion), &error)) {
     logFailure("colour", error);
@@ -432,7 +469,16 @@ bool GpuImagePipeline::processColor(const std::shared_ptr<ob::Frame> &mjpg, bool
     return false;
   }
   auto out = frameFromProfile(rectified_profile_, mjpg);
+  if (out->getDataSize() < rectified_bytes_) {
+    logFailure("colour", "the rectified frame buffer is smaller than its resolution");
+    return false;
+  }
   uint8_t *rgb = (rgb_wanted || compare_now) ? out->getData() : nullptr;
+  if (rgb == nullptr) {
+    // Nothing reads the pixels now, but a reader that subscribes before the
+    // publish gets a black frame, never stale memory.
+    std::memset(out->getData(), 0, out->getDataSize());
+  }
   if (rgb != nullptr || jpeg_wanted) {
     std::string error;
     if (!color_->process(mjpg->getData(), jpegSize(mjpg), rgb, jpeg_wanted ? jpeg : nullptr,

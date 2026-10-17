@@ -211,8 +211,16 @@ struct NvJpegHardware::Impl {
   CUgraphicsResource decoded_resource = nullptr;
   Yuv420Planes yuv_planes;
   std::vector<unsigned char> out_buffer;
+  // A member, not a local: it must survive a longjmp out of the encoder.
+  unsigned char *out = nullptr;
+  // The decoded frame's sampling, read before jpeg_finish_decompress frees
+  // comp_info.
+  int h_samp = 0;
+  int v_samp = 0;
 
   ~Impl() {
+    // The EGL resources need a current CUDA context on the tearing-down thread.
+    cudaFree(nullptr);
     releaseDecoded();
     destroyDecoder();
     if (encoder_ready) {
@@ -295,7 +303,9 @@ struct NvJpegHardware::Impl {
       destroyDecoder();
       return false;
     }
-    lib->read_raw_data(&dinfo, nullptr, dinfo.comp_info[0].v_samp_factor * DCTSIZE);
+    h_samp = dinfo.comp_info[0].h_samp_factor;
+    v_samp = dinfo.comp_info[0].v_samp_factor;
+    lib->read_raw_data(&dinfo, nullptr, v_samp * DCTSIZE);
     lib->finish_decompress(&dinfo);
     if (static_cast<int>(dinfo.image_width) != width ||
         static_cast<int>(dinfo.image_height) != height) {
@@ -309,8 +319,8 @@ struct NvJpegHardware::Impl {
     return true;
   }
 
-  int hShift() const { return dinfo.comp_info[0].h_samp_factor == 2 ? 1 : 0; }
-  int vShift() const { return dinfo.comp_info[0].v_samp_factor == 2 ? 1 : 0; }
+  int hShift() const { return h_samp == 2 ? 1 : 0; }
+  int vShift() const { return v_samp == 2 ? 1 : 0; }
 };
 
 NvJpegHardware::NvJpegHardware() : impl_(std::make_unique<Impl>()) {}
@@ -362,7 +372,7 @@ bool NvJpegHardware::decode(const uint8_t *jpeg, size_t size, YcbcrPlanes *plane
   if (!s.decodeToFd(jpeg, size, &fd, error)) {
     return false;
   }
-  if (s.dinfo.comp_info[0].v_samp_factor > s.dinfo.comp_info[0].h_samp_factor) {
+  if (s.v_samp > s.h_samp) {
     *error = "JPEG chroma subsampled only vertically, which this path does not convert";
     return false;
   }
@@ -414,7 +424,10 @@ bool NvJpegHardware::decode(const uint8_t *jpeg, size_t size, YcbcrPlanes *plane
   return true;
 }
 
-void NvJpegHardware::releaseDecoded() { impl_->releaseDecoded(); }
+void NvJpegHardware::releaseDecoded() {
+  cudaFree(nullptr);
+  impl_->releaseDecoded();
+}
 
 const Yuv420Planes &NvJpegHardware::encodeInput() const { return impl_->yuv_planes; }
 
@@ -424,16 +437,19 @@ bool NvJpegHardware::encode(int quality, std::vector<uint8_t> *jpeg, std::string
     *error = std::string("NVJPG encoder init: ") + s.cerr.message;
     return false;
   }
-  unsigned char *out = s.out_buffer.data();
+  s.out = s.out_buffer.data();
   size_t out_size = s.out_buffer.size();
   s.cerr.message[0] = '\0';
   if (setjmp(s.cerr.jump_buffer) != 0) {
     *error = std::string("NVJPG encode: ") + s.cerr.message;
     s.lib->destroy_compress(&s.cinfo);
     s.encoder_ready = false;
+    if (s.out != s.out_buffer.data()) {
+      std::free(s.out);
+    }
     return false;
   }
-  s.lib->mem_dest(&s.cinfo, &out, &out_size);
+  s.lib->mem_dest(&s.cinfo, &s.out, &out_size);
   s.cinfo.fd = s.yuv.fd();
   s.cinfo.IsVendorbuf = TRUE;
   s.cinfo.raw_data_in = TRUE;
@@ -445,10 +461,10 @@ bool NvJpegHardware::encode(int quality, std::vector<uint8_t> *jpeg, std::string
   s.lib->start_compress(&s.cinfo, 0);
   s.lib->write_raw_data(&s.cinfo, nullptr, 0);
   s.lib->finish_compress(&s.cinfo);
-  jpeg->assign(out, out + out_size);
+  jpeg->assign(s.out, s.out + out_size);
   // libjpeg moves to a buffer of its own when ours is too small.
-  if (out != s.out_buffer.data()) {
-    std::free(out);
+  if (s.out != s.out_buffer.data()) {
+    std::free(s.out);
   }
   return true;
 }

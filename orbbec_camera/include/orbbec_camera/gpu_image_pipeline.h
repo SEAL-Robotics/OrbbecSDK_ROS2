@@ -119,6 +119,7 @@ class GpuImagePipeline {
   bool compare_depth_now_ = false;
   std::string depth_key_;
   std::shared_ptr<ob::StreamProfile> aligned_profile_;
+  size_t aligned_bytes_ = 0;
   int depth_frames_ = 0;
   std::shared_ptr<ob::Filter> sdk_noise_filter_;
   bool sdk_noise_filter_tried_ = false;
@@ -129,6 +130,7 @@ class GpuImagePipeline {
   std::unique_ptr<gpu::ColorPipeline> color_;
   std::string color_key_;
   std::shared_ptr<ob::StreamProfile> rectified_profile_;
+  size_t rectified_bytes_ = 0;
   int color_frames_ = 0;
   std::unique_ptr<ob::UnDistortionFilter> sdk_undistortion_;
 

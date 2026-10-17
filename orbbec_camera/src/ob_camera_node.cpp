@@ -7506,7 +7506,7 @@ void OBCameraNode::onNewFrameCallback(const std::shared_ptr<ob::Frame> &frame,
     }
     publishCompressedColorImage(frame, stream_index, timestamp, frame_id);
   } else if (stream_index == COLOR && has_explicit_compressed_publisher &&
-             has_compressed_image_subscriber && !gpu_color_active_ &&
+             has_compressed_image_subscriber && !color_jpeg_published_by_gpu_ &&
              (frame->getFormat() == OB_FORMAT_RGB || frame->getFormat() == OB_FORMAT_RGB888)) {
     // Undistorted by the SDK: there is no camera JPEG of this picture.
     std::vector<uint8_t> jpeg;
@@ -8495,8 +8495,14 @@ bool OBCameraNode::applyNamedDepthFilterConfig(
       }
     }
 
+    std::string gpu_error;
     if (applyNoiseRemovalToGpu(enabled, has_min_diff ? min_diff : noise_removal_filter_min_diff_,
-                               has_max_size ? max_size : noise_removal_filter_max_size_)) {
+                               has_max_size ? max_size : noise_removal_filter_max_size_,
+                               &gpu_error)) {
+      if (!gpu_error.empty()) {
+        message = gpu_error;
+        return false;
+      }
       if (has_min_diff) {
         noise_removal_filter_min_diff_ = min_diff;
       }
@@ -8838,13 +8844,19 @@ void OBCameraNode::setFilterCallback(const std::shared_ptr<SetFilter ::Request> 
         fail("Filter '" + normalized_request_filter_name + "' is not supported by this device");
         return;
       }
+      std::string gpu_error;
       if (is_noise_removal_filter &&
           applyNoiseRemovalToGpu(
               request->filter_enable,
               request->filter_param.size() > 1 ? request->filter_param[0]
                                                : noise_removal_filter_min_diff_,
               request->filter_param.size() > 1 ? request->filter_param[1]
-                                               : noise_removal_filter_max_size_)) {
+                                               : noise_removal_filter_max_size_,
+              &gpu_error)) {
+        if (!gpu_error.empty()) {
+          fail(gpu_error);
+          return;
+        }
         if (request->filter_param.size() > 1) {
           noise_removal_filter_min_diff_ = request->filter_param[0];
           noise_removal_filter_max_size_ = request->filter_param[1];

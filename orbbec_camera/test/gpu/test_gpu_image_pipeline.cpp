@@ -167,6 +167,34 @@ TEST_F(GpuImagePipelineTest, ColourIsRectifiedWithSdkProfileAndEncoded) {
   EXPECT_GT(encoded.size(), 1000u);
 }
 
+TEST_F(GpuImagePipelineTest, UncomputedColourIsBlackNeverStale) {
+  GpuImagePipeline pipeline(node_.get(), GpuImagePipeline::Options{});
+  const auto jpeg = gpu::test::encodeJpeg(
+      gpu::test::makeColor(kWidth, kHeight, 3, kWidth * 3), kWidth, kHeight, 2, 1, 90);
+  std::shared_ptr<ob::Frame> rectified;
+  std::vector<uint8_t> encoded;
+  ASSERT_TRUE(pipeline.processColor(colorFrame(jpeg, 7), false, false, &rectified, &encoded));
+  const uint8_t *data = rectified->getData();
+  EXPECT_TRUE(std::all_of(data, data + rectified->getDataSize(), [](uint8_t v) { return v == 0; }));
+  EXPECT_TRUE(encoded.empty());
+}
+
+TEST_F(GpuImagePipelineTest, ColourWithoutDistortionIsLeftToTheSdk) {
+  color_profile_ = makeProfile(OB_STREAM_COLOR, OB_FORMAT_MJPG, color_intrinsic_, {});
+  GpuImagePipeline pipeline(node_.get(), GpuImagePipeline::Options{});
+  const auto jpeg = gpu::test::encodeJpeg(
+      gpu::test::makeColor(kWidth, kHeight, 3, kWidth * 3), kWidth, kHeight, 2, 1, 90);
+  auto color = colorFrame(jpeg, 7);
+  std::shared_ptr<ob::Frame> rectified;
+  std::vector<uint8_t> encoded;
+  EXPECT_FALSE(pipeline.processColor(color, true, true, &rectified, &encoded));
+  // The SDK passes an undistorted stream through as MJPG, which the driver
+  // then decodes on its usual path.
+  auto sdk = pipeline.sdkRectify(color);
+  ASSERT_TRUE(sdk);
+  EXPECT_EQ(sdk->getFormat(), OB_FORMAT_MJPG);
+}
+
 TEST_F(GpuImagePipelineTest, ComparisonModePublishesEveryStage) {
   GpuImagePipeline::Options options;
   options.compare = true;

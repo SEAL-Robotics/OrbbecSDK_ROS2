@@ -684,7 +684,10 @@ class OBCameraNode {
   bool imageWanted(const stream_index_pair& stream_index);
   bool depthDataWanted();
   void processGpuColorFrameSet(const std::shared_ptr<ob::FrameSet>& frame_set);
-  bool applyNoiseRemovalToGpu(bool enabled, int min_diff, int max_size);
+  // true when the GPU owns the filter; error is set when the values are refused.
+  bool applyNoiseRemovalToGpu(bool enabled, int min_diff, int max_size, std::string* error);
+  void setSdkNoiseRemovalFilter(bool enabled);
+  void processColorFrameSetOnSdk(const std::shared_ptr<ob::Frame>& frame);
 
   orbbec_camera_msgs::msg::IMUInfo createIMUInfo(const stream_index_pair& stream_index);
 
@@ -1113,6 +1116,8 @@ class OBCameraNode {
   bool gpu_speckle_filter_active_ = false;
   bool gpu_depth_alignment_active_ = false;
   bool gpu_color_active_ = false;
+  // Set around onNewFrameCallback while the GPU path publishes its own JPEG.
+  bool color_jpeg_published_by_gpu_ = false;
   std::unique_ptr<GpuImagePipeline> gpu_;
   std::shared_ptr<ob::EnhancedDepthFilter> enhanced_depth_filter_ = nullptr;
   ob::FormatConvertFilter enhanced_depth_format_convert_filter_;
