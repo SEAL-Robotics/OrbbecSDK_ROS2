@@ -515,6 +515,10 @@ void OBCameraNode::publishDepthFiltersStatus() {
       // Keep the cached value if runtime querying fails.
     }
   }
+  // The device's filter is off while the GPU runs it.
+  if (gpu_ && gpu_speckle_filter_active_) {
+    enable_noise_removal_filter_ = gpu_->speckleEnabled();
+  }
   if (device_->isPropertySupported(OB_PROP_DEPTH_MAX_DIFF_INT, OB_PERMISSION_WRITE)) {
     try {
       noise_removal_filter_min_diff_ = device_->getIntProperty(OB_PROP_DEPTH_MAX_DIFF_INT);
@@ -1885,10 +1889,14 @@ void OBCameraNode::setupDevices() {
   if (should_apply_launch_config("enable_noise_removal_filter") &&
       sensors_.find(DEPTH) != sensors_.end() &&
       device_->isPropertySupported(OB_PROP_DEPTH_SOFT_FILTER_BOOL, OB_PERMISSION_READ_WRITE)) {
+    // With the GPU pipeline the filter runs on the GPU, so the SDK's stays off.
+    const bool sdk_noise_removal_filter =
+        enable_noise_removal_filter_ && !gpu_speckle_filter_active_;
     TRY_TO_SET_PROPERTY(setBoolProperty, OB_PROP_DEPTH_SOFT_FILTER_BOOL,
-                        enable_noise_removal_filter_);
+                        sdk_noise_removal_filter);
     RCLCPP_INFO_STREAM(logger_, "Set noise removal filter to "
-                                    << (enable_noise_removal_filter_ ? "true" : "false"));
+                                    << (enable_noise_removal_filter_ ? "true" : "false")
+                                    << (gpu_speckle_filter_active_ ? " (on the GPU)" : ""));
   }
   if (should_apply_launch_config("enable_disp_outliers_filter") &&
       sensors_.find(DEPTH) != sensors_.end() &&
@@ -3188,6 +3196,11 @@ void OBCameraNode::setupUndistortionFilters() {
       hw_d2c_color_undistortion_filter_->enable(true);
       RCLCPP_INFO_STREAM(logger_,
                          "Enable color undistortion with HW D2C depth intrinsic projection");
+      return;
+    }
+    if (stream_index == COLOR && gpu_color_active_) {
+      remove_undistortion_filter(filters);
+      RCLCPP_INFO_STREAM(logger_, "Color undistortion runs in the GPU image pipeline");
       return;
     }
     auto undistortion_filter = find_or_create_filter(filters, stream_index.first);
@@ -4996,6 +5009,13 @@ void OBCameraNode::getParameters() {
                                 "hardware_noise_removal_filter_threshold", -1.0);
   setAndGetNodeParameter<int>(noise_removal_filter_min_diff_, "noise_removal_filter_min_diff", -1);
   setAndGetNodeParameter<int>(noise_removal_filter_max_size_, "noise_removal_filter_max_size", -1);
+  setAndGetNodeParameter<bool>(gpu_pipeline_, "gpu_pipeline", false);
+  setAndGetNodeParameter<bool>(gpu_speckle_filter_, "gpu_speckle_filter", true);
+  setAndGetNodeParameter<bool>(gpu_depth_alignment_, "gpu_depth_alignment", true);
+  setAndGetNodeParameter<bool>(gpu_color_, "gpu_color", true);
+  setAndGetNodeParameter<bool>(gpu_compare_, "gpu_compare", false);
+  setAndGetNodeParameter<int>(gpu_compare_every_n_, "gpu_compare_every_n", 1);
+  setAndGetNodeParameter<int>(color_jpeg_quality_, "color_jpeg_quality", 75);
   setAndGetNodeParameter<float>(spatial_filter_alpha_, "spatial_filter_alpha", -1.0);
   setAndGetNodeParameter<int>(spatial_filter_diff_threshold_, "spatial_filter_diff_threshold", -1);
   setAndGetNodeParameter<int>(spatial_filter_magnitude_, "spatial_filter_magnitude", -1);
@@ -5207,6 +5227,7 @@ void OBCameraNode::setupTopics() {
     getParameters();
     loadConfigJson();
     syncConfigJsonApplicationConfig();
+    resolveGpuPipeline();
     setupDevices();
     setupDepthPostProcessFilter();
     setupColorPostProcessFilter();
@@ -5215,6 +5236,7 @@ void OBCameraNode::setupTopics() {
     setupLeftIrPostProcessFilter();
     setupUndistortionFilters();
     syncConfigJsonDeviceSettings();
+    createGpuPipeline();
     syncConfigJsonFilterSettings(depth_filter_list_, "depth");
     syncConfigJsonFilterSettings(color_filter_list_, "color");
     syncConfigJsonFilterSettings(left_color_filter_list_, "left_color");
@@ -5828,14 +5850,12 @@ void OBCameraNode::setupImagePublisher(const stream_index_pair &stream_index) {
   }
 
   const auto image_qos_profile = getImageQosProfile(stream_index);
-  // The undistortion filter hands on decoded RGB, so the camera's JPEG never
-  // reaches the passthrough and its topic would be advertised but never sent.
-  const auto undistortion = enable_undistortion_.find(stream_index);
-  const bool is_undistorted =
-      undistortion != enable_undistortion_.end() && undistortion->second;
+  // An MJPG colour stream has its compressed topic published by the driver:
+  // the camera's own JPEG, or a JPEG of the rectified image when it is
+  // undistorted (encodeRectifiedColor / the GPU pipeline).
   const bool is_mjpg_color_stream =
       (stream_index == COLOR || stream_index == COLOR_LEFT || stream_index == COLOR_RIGHT) &&
-      format_[stream_index] == OB_FORMAT_MJPG && !is_undistorted;
+      format_[stream_index] == OB_FORMAT_MJPG;
   const bool uses_image_transport = !use_intra_process_ && !is_mjpg_color_stream;
   if (use_intra_process_ || is_mjpg_color_stream) {
     releaseGlobalImageTransportPublisher(*node_, topic);
@@ -6816,9 +6836,21 @@ void OBCameraNode::onNewFrameSetCallback(std::shared_ptr<ob::FrameSet> frame_set
     auto right_color_frame = frame_set->getFrame(OB_FRAME_COLOR_RIGHT);
     auto ir_frame = frame_set->getFrame(OB_FRAME_IR);
     auto depth_frame_for_hw_d2c_undistortion = depth_frame;
+    const bool gpu_depth = gpu_ && (gpu_speckle_filter_active_ || gpu_depth_alignment_active_);
+    const bool depth_data_wanted = gpu_depth && depth_frame && depthDataWanted();
+    if (gpu_depth && depth_frame) {
+      gpu_->startDepthFrame();
+    }
     if (depth_frame) {
       setDisparitySearchOffset();
       setDepthAutoExposureROI();
+      // The GPU's noise filter stands where the SDK's ran: before the
+      // other depth filters and the alignment.
+      if (gpu_ && gpu_speckle_filter_active_ && gpu_->speckleEnabled()) {
+        if (auto filtered = gpu_->filterDepth(depth_frame, depth_data_wanted)) {
+          depth_frame = filtered;
+        }
+      }
       depth_frame = processDepthFrameFilter(depth_frame);
       if (depth_frame) {
         frame_set->pushFrame(depth_frame);
@@ -6898,7 +6930,15 @@ void OBCameraNode::onNewFrameSetCallback(std::shared_ptr<ob::FrameSet> frame_set
             frame_set->pushFrame(color_frame);
           }
         }
-        if (align_target_stream_ != OB_STREAM_DEPTH || align_color_frame) {
+        std::shared_ptr<ob::Frame> gpu_aligned;
+        if (gpu_ && gpu_depth_alignment_active_ && align_target_stream_ == OB_STREAM_COLOR) {
+          gpu_aligned =
+              gpu_->alignDepth(depth_frame, color_frame, *align_filter_, depth_data_wanted);
+        }
+        if (gpu_aligned) {
+          frame_set->pushFrame(gpu_aligned);
+          depth_frame = gpu_aligned;
+        } else if (align_target_stream_ != OB_STREAM_DEPTH || align_color_frame) {
           if (auto new_frame = align_filter_->process(frame_set)) {
             auto new_frame_set = new_frame->as<ob::FrameSet>();
             CHECK_NOTNULL(new_frame_set.get());
@@ -7041,8 +7081,12 @@ void OBCameraNode::onNewColorFrameCallback() {
                        .count());
     }
 
-    is_color_frame_decoded_ = decodeColorFrameToBuffer(frameSet->colorFrame(), rgb_buffer_);
-    onNewFrameCallback(frameSet->colorFrame(), COLOR);
+    if (gpu_ && gpu_color_active_) {
+      processGpuColorFrameSet(frameSet);
+    } else {
+      is_color_frame_decoded_ = decodeColorFrameToBuffer(frameSet->colorFrame(), rgb_buffer_);
+      onNewFrameCallback(frameSet->colorFrame(), COLOR);
+    }
     publishPointCloud(frameSet);
   }
 
@@ -7461,6 +7505,19 @@ void OBCameraNode::onNewFrameCallback(const std::shared_ptr<ob::Frame> &frame,
                                                    getSteadyNowUs());
     }
     publishCompressedColorImage(frame, stream_index, timestamp, frame_id);
+  } else if (stream_index == COLOR && has_explicit_compressed_publisher &&
+             has_compressed_image_subscriber && !gpu_color_active_ &&
+             (frame->getFormat() == OB_FORMAT_RGB || frame->getFormat() == OB_FORMAT_RGB888)) {
+    // Undistorted by the SDK: there is no camera JPEG of this picture.
+    std::vector<uint8_t> jpeg;
+    std::string error;
+    if (gpu::encodeRgbJpegCpu(frame->getData(), width, height, color_jpeg_quality_, &jpeg,
+                              &error)) {
+      publishJpegColorImage(std::move(jpeg), stream_index, timestamp, frame_id);
+    } else {
+      RCLCPP_ERROR_STREAM_THROTTLE(logger_, *node_->get_clock(), 5000,
+                                   "Colour JPEG encode failed: " << error);
+    }
   }
 
   if (!has_raw_image_subscriber && !save_images_[stream_index] &&
@@ -8438,6 +8495,17 @@ bool OBCameraNode::applyNamedDepthFilterConfig(
       }
     }
 
+    if (applyNoiseRemovalToGpu(enabled, has_min_diff ? min_diff : noise_removal_filter_min_diff_,
+                               has_max_size ? max_size : noise_removal_filter_max_size_)) {
+      if (has_min_diff) {
+        noise_removal_filter_min_diff_ = min_diff;
+      }
+      if (has_max_size) {
+        noise_removal_filter_max_size_ = max_size;
+      }
+      updateDepthFilterEnabledCache(normalized_filter_name, enabled);
+      return true;
+    }
     if (device_->isPropertySupported(OB_PROP_DEPTH_SOFT_FILTER_BOOL, OB_PERMISSION_READ_WRITE)) {
       device_->setBoolProperty(OB_PROP_DEPTH_SOFT_FILTER_BOOL, enabled);
     }
@@ -8770,7 +8838,19 @@ void OBCameraNode::setFilterCallback(const std::shared_ptr<SetFilter ::Request> 
         fail("Filter '" + normalized_request_filter_name + "' is not supported by this device");
         return;
       }
-      if (is_noise_removal_filter) {
+      if (is_noise_removal_filter &&
+          applyNoiseRemovalToGpu(
+              request->filter_enable,
+              request->filter_param.size() > 1 ? request->filter_param[0]
+                                               : noise_removal_filter_min_diff_,
+              request->filter_param.size() > 1 ? request->filter_param[1]
+                                               : noise_removal_filter_max_size_)) {
+        if (request->filter_param.size() > 1) {
+          noise_removal_filter_min_diff_ = request->filter_param[0];
+          noise_removal_filter_max_size_ = request->filter_param[1];
+        }
+        enable_noise_removal_filter_ = request->filter_enable;
+      } else if (is_noise_removal_filter) {
         if (device_->isPropertySupported(OB_PROP_DEPTH_SOFT_FILTER_BOOL,
                                          OB_PERMISSION_READ_WRITE)) {
           device_->setBoolProperty(OB_PROP_DEPTH_SOFT_FILTER_BOOL, request->filter_enable);

@@ -12,7 +12,9 @@
 #include <vector>
 
 #include "libobsensor/ObSensor.hpp"
+#include "jpeg_test_util.h"
 #include "orbbec_camera/gpu/image_metrics.h"
+#include "orbbec_camera/gpu/pipelines.h"
 #include "orbbec_camera/gpu/sdk_algorithms.h"
 #include "synthetic_frames.h"
 
@@ -64,6 +66,28 @@ TEST(SdkUndistortion, CpuPortMatchesSdkFilterBitForBit) {
   const auto diff = compareColor(sdk->getData(), ours.data(),
                                  ours.size());
   EXPECT_EQ(diff.max_abs_diff, 0) << "PSNR " << diff.psnr_db;
+}
+
+TEST(SdkDecode, CpuDecodeMatchesSdkMjpgDecodeBitForBit) {
+  const int width = 1280, height = 800;
+  const auto rgb = test::makeColor(width, height, 3, static_cast<size_t>(width) * 3);
+  for (const int v_samp : {1, 2}) {
+    const auto jpeg = test::encodeJpeg(rgb, width, height, 2, v_samp, 90);
+    auto profile = makeProfile(OB_STREAM_COLOR, OB_FORMAT_MJPG, test::makeIntrinsic(width, height),
+                               test::makeColorDistortion());
+    auto frame = ob::FrameFactory::createFrameFromStreamProfile(profile);
+    frame->updateData(jpeg.data(), static_cast<uint32_t>(jpeg.size()));
+    ob::FormatConvertFilter convert;
+    convert.setFormatConvertType(FORMAT_MJPG_TO_RGB);
+    auto sdk = convert.process(frame);
+    ASSERT_TRUE(sdk);
+    std::vector<uint8_t> ours;
+    std::string error;
+    ASSERT_TRUE(decodeJpegRgbCpu(jpeg.data(), jpeg.size(), width, height, &ours, &error)) << error;
+    ASSERT_EQ(ours.size(), sdk->getDataSize());
+    const auto diff = compareColor(sdk->getData(), ours.data(), ours.size());
+    EXPECT_EQ(diff.max_abs_diff, 0) << "4:2:" << (v_samp == 1 ? "2" : "0");
+  }
 }
 
 TEST(SdkUndistortion, FourChannelSourceGivesTheSameRgb) {

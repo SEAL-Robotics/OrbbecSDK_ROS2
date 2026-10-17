@@ -58,9 +58,9 @@ TEST(ColorPipeline, RectifiedRgbAndJpegMatchTheReference) {
   std::printf("[ colour ] %s vs CPU decode+remap: PSNR %.2f dB, max %d\n",
               backendName(pipeline->backend()), rgb_diff.psnr_db, rgb_diff.max_abs_diff);
   if (pipeline->backend() == ColorPipeline::Backend::kNvHardware) {
-    // NVJPG's inverse DCT is not libjpeg's: close, not equal.
-    EXPECT_GT(rgb_diff.psnr_db, 45.0);
-    EXPECT_LE(rgb_diff.max_abs_diff, 8);
+    // NVJPG's inverse DCT is not the fast one the SDK uses: close, not equal.
+    EXPECT_GT(rgb_diff.psnr_db, 40.0);
+    EXPECT_LE(rgb_diff.max_abs_diff, 10);
   } else {
     EXPECT_EQ(rgb_diff.max_abs_diff, 0);
   }

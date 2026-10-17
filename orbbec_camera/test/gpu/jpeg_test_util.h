@@ -100,6 +100,29 @@ inline std::vector<uint8_t> encodeJpeg(const std::vector<uint8_t> &rgb, int widt
   return jpeg;
 }
 
+inline std::vector<uint8_t> decodeRgb(const std::vector<uint8_t> &jpeg, bool fancy,
+                                      J_DCT_METHOD dct) {
+  jpeg_decompress_struct cinfo{};
+  jpeg_error_mgr jerr{};
+  cinfo.err = jpeg_std_error(&jerr);
+  jpeg_create_decompress(&cinfo);
+  jpeg_mem_src(&cinfo, jpeg.data(), static_cast<unsigned long>(jpeg.size()));
+  jpeg_read_header(&cinfo, TRUE);
+  cinfo.out_color_space = JCS_RGB;
+  cinfo.do_fancy_upsampling = fancy ? TRUE : FALSE;
+  cinfo.dct_method = dct;
+  jpeg_start_decompress(&cinfo);
+  const size_t row_bytes = static_cast<size_t>(cinfo.output_width) * 3;
+  std::vector<uint8_t> rgb(row_bytes * cinfo.output_height);
+  while (cinfo.output_scanline < cinfo.output_height) {
+    JSAMPROW row = rgb.data() + cinfo.output_scanline * row_bytes;
+    jpeg_read_scanlines(&cinfo, &row, 1);
+  }
+  jpeg_finish_decompress(&cinfo);
+  jpeg_destroy_decompress(&cinfo);
+  return rgb;
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace orbbec_camera

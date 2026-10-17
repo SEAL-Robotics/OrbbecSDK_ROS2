@@ -78,6 +78,7 @@
 #include "orbbec_camera/d2c_viewer.h"
 #include "orbbec_camera/image_publisher.h"
 #include "orbbec_camera/fps_counter.hpp"
+#include "orbbec_camera/gpu_image_pipeline.h"
 #include "orbbec_camera/stream_status.hpp"
 #include "orbbec_camera/timestamp_csv_logger.h"
 #include "jpeg_decoder.h"
@@ -675,6 +676,15 @@ class OBCameraNode {
   void publishCompressedColorImage(const std::shared_ptr<ob::Frame>& frame,
                                    const stream_index_pair& stream_index,
                                    const rclcpp::Time& timestamp, const std::string& frame_id);
+  void publishJpegColorImage(std::vector<uint8_t> jpeg, const stream_index_pair& stream_index,
+                             const rclcpp::Time& timestamp, const std::string& frame_id);
+  // SEAL GPU image pipeline (gpu_image_pipeline.h).
+  void resolveGpuPipeline();
+  void createGpuPipeline();
+  bool imageWanted(const stream_index_pair& stream_index);
+  bool depthDataWanted();
+  void processGpuColorFrameSet(const std::shared_ptr<ob::FrameSet>& frame_set);
+  bool applyNoiseRemovalToGpu(bool enabled, int min_diff, int max_size);
 
   orbbec_camera_msgs::msg::IMUInfo createIMUInfo(const stream_index_pair& stream_index);
 
@@ -1091,6 +1101,19 @@ class OBCameraNode {
   double diagnostic_period_ = 0.0;
   bool enable_laser_ = false;
   std::unique_ptr<ob::Align> align_filter_ = nullptr;
+  // SEAL GPU image pipeline: the parameters, then what is actually active
+  // once the build, the GPU and the stream configuration have had a say.
+  bool gpu_pipeline_ = false;
+  bool gpu_speckle_filter_ = true;
+  bool gpu_depth_alignment_ = true;
+  bool gpu_color_ = true;
+  bool gpu_compare_ = false;
+  int gpu_compare_every_n_ = 1;
+  int color_jpeg_quality_ = 75;
+  bool gpu_speckle_filter_active_ = false;
+  bool gpu_depth_alignment_active_ = false;
+  bool gpu_color_active_ = false;
+  std::unique_ptr<GpuImagePipeline> gpu_;
   std::shared_ptr<ob::EnhancedDepthFilter> enhanced_depth_filter_ = nullptr;
   ob::FormatConvertFilter enhanced_depth_format_convert_filter_;
   std::mutex enhanced_depth_filter_mutex_;

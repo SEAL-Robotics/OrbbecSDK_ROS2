@@ -59,7 +59,10 @@ ORBBEC_HOST_DEVICE inline void rgbBlockToYuv420(const uint8_t *rgb, size_t rgb_p
 }
 
 // Planes of a decoded JPEG: full-resolution Y, and Cb and Cr subsampled 2:1
-// horizontally (h_shift 1) and, for 4:2:0, vertically (v_shift 1).
+// horizontally (h_shift 1) and, for 4:2:0, vertically (v_shift 1). fancy
+// picks libjpeg's triangle-filter chroma upsampling; without it each chroma
+// sample covers its block, as libjpeg's merged upsampler does when fancy
+// upsampling is off, which is how the SDK decodes MJPG.
 struct YcbcrPlanes {
   const uint8_t *plane[3] = {nullptr, nullptr, nullptr};
   size_t pitch[3] = {0, 0, 0};
@@ -67,6 +70,7 @@ struct YcbcrPlanes {
   int height = 0;
   int h_shift = 1;
   int v_shift = 0;
+  bool fancy = false;
 };
 
 ORBBEC_HOST_DEVICE inline int chromaWidth(const YcbcrPlanes &p) {
@@ -77,15 +81,15 @@ ORBBEC_HOST_DEVICE inline int chromaHeight(const YcbcrPlanes &p) {
   return (p.height + (1 << p.v_shift) - 1) >> p.v_shift;
 }
 
-// libjpeg's "fancy" (triangle-filter) upsampling of one chroma sample at
-// full-resolution (x, y): h2v1_fancy_upsample and h2v2_fancy_upsample, with
-// the image's first and last rows repeated as their context.
-ORBBEC_HOST_DEVICE inline int fancyChroma(const uint8_t *plane, size_t pitch, const YcbcrPlanes &p,
-                                          int x, int y) {
+// One chroma sample at full-resolution (x, y). Fancy is libjpeg's
+// h2v1_fancy_upsample and h2v2_fancy_upsample, with the image's first and
+// last rows repeated as their context.
+ORBBEC_HOST_DEVICE inline int upsampledChroma(const uint8_t *plane, size_t pitch,
+                                              const YcbcrPlanes &p, int x, int y) {
   const int cw = chromaWidth(p);
   const int j = x >> p.h_shift;
-  if (p.h_shift == 0 && p.v_shift == 0) {
-    return plane[y * pitch + x];
+  if (!p.fancy || (p.h_shift == 0 && p.v_shift == 0)) {
+    return plane[(y >> p.v_shift) * pitch + j];
   }
   if (p.v_shift == 0) {
     const uint8_t *row = plane + y * pitch;
@@ -133,8 +137,8 @@ ORBBEC_HOST_DEVICE inline void jfifToRgb(int y, int cb, int cr, uint8_t *rgb) {
 
 ORBBEC_HOST_DEVICE inline void ycbcrPixelToRgb(const YcbcrPlanes &p, int x, int y, uint8_t *rgb) {
   const int luma = p.plane[0][y * p.pitch[0] + x];
-  const int cb = fancyChroma(p.plane[1], p.pitch[1], p, x, y);
-  const int cr = fancyChroma(p.plane[2], p.pitch[2], p, x, y);
+  const int cb = upsampledChroma(p.plane[1], p.pitch[1], p, x, y);
+  const int cr = upsampledChroma(p.plane[2], p.pitch[2], p, x, y);
   jfifToRgb(luma, cb, cr, rgb);
 }
 

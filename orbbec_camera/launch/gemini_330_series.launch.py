@@ -293,6 +293,15 @@ def generate_launch_description():
         DeclareLaunchArgument('time_domain', default_value='global'),# global, device, system
         # SEAL: seconds added to every image stamp (capture instant).
         DeclareLaunchArgument('stamp_offset_s', default_value='0.0'),
+        # SEAL: the GPU image pipeline (gpu_image_pipeline.h) and the JPEG
+        # quality of the rectified colour on color/image_raw/compressed.
+        DeclareLaunchArgument('gpu_pipeline', default_value='false'),
+        DeclareLaunchArgument('gpu_speckle_filter', default_value='true'),
+        DeclareLaunchArgument('gpu_depth_alignment', default_value='true'),
+        DeclareLaunchArgument('gpu_color', default_value='true'),
+        DeclareLaunchArgument('gpu_compare', default_value='false'),
+        DeclareLaunchArgument('gpu_compare_every_n', default_value='1'),
+        DeclareLaunchArgument('color_jpeg_quality', default_value='75'),
         DeclareLaunchArgument('timestamp_clock_type', default_value=''),# realtime or monotonic, default is realtime.
         DeclareLaunchArgument('enable_frame_drop_log', default_value='false'),
         DeclareLaunchArgument('frame_timestamp_csv_file', default_value=''),

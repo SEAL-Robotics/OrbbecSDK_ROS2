@@ -7,9 +7,6 @@
 
 #include <gtest/gtest.h>
 
-#include <opencv2/imgcodecs.hpp>
-#include <opencv2/imgproc.hpp>
-
 #include <utility>
 #include <vector>
 
@@ -22,25 +19,32 @@ namespace orbbec_camera {
 namespace gpu {
 namespace {
 
-class ColorMath : public ::testing::TestWithParam<std::pair<int, int>> {};
+struct Case {
+  int h_samp;
+  int v_samp;
+  bool fancy;
+};
+
+class ColorMath : public ::testing::TestWithParam<Case> {};
 
 TEST_P(ColorMath, RawPlanesConvertExactlyAsLibjpegDecodes) {
+  const Case c = GetParam();
   // Odd sizes exercise the last chroma column and row.
   for (const auto &size : {std::pair<int, int>{1280, 800}, std::pair<int, int>{333, 211}}) {
     const auto rgb_in =
         test::makeColor(size.first, size.second, 3, static_cast<size_t>(size.first) * 3);
-    const auto jpeg = test::encodeJpeg(rgb_in, size.first, size.second, GetParam().first,
-                                       GetParam().second, 92);
+    const auto jpeg = test::encodeJpeg(rgb_in, size.first, size.second, c.h_samp, c.v_samp, 92);
     const test::RawJpeg raw = test::decodeRaw(jpeg);
     YcbcrPlanes planes;
-    for (int c = 0; c < 3; ++c) {
-      planes.plane[c] = raw.plane[c].data();
-      planes.pitch[c] = raw.pitch[c];
+    for (int k = 0; k < 3; ++k) {
+      planes.plane[k] = raw.plane[k].data();
+      planes.pitch[k] = raw.pitch[k];
     }
     planes.width = raw.width;
     planes.height = raw.height;
     planes.h_shift = raw.h_shift;
     planes.v_shift = raw.v_shift;
+    planes.fancy = c.fancy;
 
     std::vector<uint8_t> ours(static_cast<size_t>(raw.width) * raw.height * 3);
     for (int y = 0; y < raw.height; ++y) {
@@ -48,21 +52,19 @@ TEST_P(ColorMath, RawPlanesConvertExactlyAsLibjpegDecodes) {
         ycbcrPixelToRgb(planes, x, y, &ours[(static_cast<size_t>(y) * raw.width + x) * 3]);
       }
     }
-    const cv::Mat encoded(1, static_cast<int>(jpeg.size()), CV_8UC1,
-                          const_cast<uint8_t *>(jpeg.data()));
-    cv::Mat bgr = cv::imdecode(encoded, cv::IMREAD_COLOR), rgb;
-    cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
-    ASSERT_TRUE(rgb.isContinuous());
-    const auto diff = compareColor(rgb.data, ours.data(), ours.size());
+    // The raw planes come from the default (slow integer) inverse DCT.
+    const auto reference = test::decodeRgb(jpeg, c.fancy, JDCT_ISLOW);
+    const auto diff = compareColor(reference.data(), ours.data(), ours.size());
     EXPECT_EQ(diff.max_abs_diff, 0) << size.first << "x" << size.second << " h_shift "
-                                    << raw.h_shift << " v_shift " << raw.v_shift << ": PSNR "
-                                    << diff.psnr_db;
+                                    << raw.h_shift << " v_shift " << raw.v_shift << " fancy "
+                                    << c.fancy << ": PSNR " << diff.psnr_db;
   }
 }
 
 INSTANTIATE_TEST_SUITE_P(Subsampling, ColorMath,
-                         ::testing::Values(std::pair<int, int>{2, 1}, std::pair<int, int>{2, 2},
-                                           std::pair<int, int>{1, 1}));
+                         ::testing::Values(Case{2, 1, false}, Case{2, 2, false},
+                                           Case{1, 1, false}, Case{2, 1, true},
+                                           Case{2, 2, true}, Case{1, 1, true}));
 
 }  // namespace
 }  // namespace gpu

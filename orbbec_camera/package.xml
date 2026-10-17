@@ -42,6 +42,7 @@
 
   <depend>eigen</depend>
   <depend>geometry_msgs</depend>
+  <depend>libjpeg</depend>
   <depend>libopencv-dev</depend>
   <depend>rcl_interfaces</depend>
   <depend>rmw</depend>

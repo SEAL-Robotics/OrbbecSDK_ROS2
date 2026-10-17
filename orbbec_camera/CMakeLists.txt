@@ -196,6 +196,8 @@ set(SOURCE_FILES
   src/timestamp_csv_logger.cpp
   src/ob_camera_node_driver.cpp
   src/ob_camera_node.cpp
+  src/ob_camera_node_gpu.cpp
+  src/gpu_image_pipeline.cpp
   src/ob_lidar_node.cpp
   src/ros_param_backend.cpp
   src/ros_service.cpp
@@ -255,7 +257,8 @@ set(ORBBEC_GPU_DEFINITIONS)
 if(HOST_PLATFORM STREQUAL "arm64")
     list(APPEND ORBBEC_GPU_DEFINITIONS ORBBEC_SDK_FUSED_MULTIPLY_ADD)
 endif()
-set(ORBBEC_GPU_LIBRARIES ${OpenCV_LIBS})
+find_package(JPEG REQUIRED)
+set(ORBBEC_GPU_LIBRARIES ${OpenCV_LIBS} JPEG::JPEG)
 set(ORBBEC_WITH_CUDA OFF)
 set(ORBBEC_WITH_NVJPG OFF)
 if(ORBBEC_GPU_PIPELINE)
@@ -521,11 +524,15 @@ if(BUILD_TESTING)
     ament_add_gtest(gpu_sdk_algorithms_test test/gpu/test_sdk_algorithms.cpp)
     target_link_directories(gpu_sdk_algorithms_test PRIVATE ${ORBBEC_LIBS_DIR})
     target_link_libraries(gpu_sdk_algorithms_test orbbec_gpu_pipeline OrbbecSDK)
-    find_package(JPEG REQUIRED)
     ament_add_gtest(gpu_pipelines_test test/gpu/test_pipelines.cpp TIMEOUT 120)
     target_link_libraries(gpu_pipelines_test orbbec_gpu_pipeline JPEG::JPEG)
     ament_add_gtest(gpu_color_math_test test/gpu/test_color_math.cpp)
     target_link_libraries(gpu_color_math_test orbbec_gpu_pipeline JPEG::JPEG)
+    # A node of its own: kept off the robot's DDS domains.
+    ament_add_gtest(gpu_image_pipeline_test test/gpu/test_gpu_image_pipeline.cpp TIMEOUT 120
+        ENV ROS_DOMAIN_ID=117 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST CYCLONEDDS_URI=)
+    target_link_directories(gpu_image_pipeline_test PRIVATE ${ORBBEC_LIBS_DIR})
+    target_link_libraries(gpu_image_pipeline_test ${PROJECT_NAME} JPEG::JPEG)
     ament_add_gtest(gpu_benchmark_test test/gpu/test_benchmark.cpp TIMEOUT 300)
     target_link_directories(gpu_benchmark_test PRIVATE ${ORBBEC_LIBS_DIR})
     target_link_libraries(gpu_benchmark_test orbbec_gpu_pipeline OrbbecSDK JPEG::JPEG)

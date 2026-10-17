@@ -5,9 +5,15 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <setjmp.h>
+
 #include <algorithm>
+#include <cstdio>
 #include <sstream>
 #include <utility>
+
+// After the C++ headers: libjpeg's header needs FILE and size_t.
+#include <jpeglib.h>
 
 #if defined(ORBBEC_WITH_CUDA)
 #include "orbbec_camera/gpu/cuda_stages.h"
@@ -266,28 +272,62 @@ std::unique_ptr<ColorPipeline> ColorPipeline::create(bool allow_cuda, bool allow
   return pipeline;
 }
 
+namespace {
+
+struct JpegErrorManager {
+  jpeg_error_mgr base;
+  jmp_buf jump_buffer;
+};
+
+void jpegErrorExit(j_common_ptr cinfo) {
+  longjmp(reinterpret_cast<JpegErrorManager *>(cinfo->err)->jump_buffer, 1);
+}
+
+void jpegQuiet(j_common_ptr, int) {}
+
+}  // namespace
+
+// The SDK's MJPG decode, reproduced: libjpeg with the fast integer inverse
+// DCT and without fancy upsampling (test_pipelines pins it to the SDK).
 bool decodeJpegRgbCpu(const uint8_t *jpeg, size_t size, int width, int height,
                       std::vector<uint8_t> *rgb, std::string *error) {
-  const cv::Mat encoded(1, static_cast<int>(size), CV_8UC1, const_cast<uint8_t *>(jpeg));
-  const cv::Mat bgr = cv::imdecode(encoded, cv::IMREAD_COLOR);
-  if (bgr.empty()) {
+  jpeg_decompress_struct cinfo{};
+  JpegErrorManager jerr{};
+  cinfo.err = jpeg_std_error(&jerr.base);
+  jerr.base.error_exit = jpegErrorExit;
+  jerr.base.emit_message = jpegQuiet;
+  if (setjmp(jerr.jump_buffer) != 0) {
+    jpeg_destroy_decompress(&cinfo);
     if (error) {
       *error = "libjpeg could not decode the frame";
     }
     return false;
   }
-  if (bgr.cols != width || bgr.rows != height) {
+  jpeg_create_decompress(&cinfo);
+  jpeg_mem_src(&cinfo, jpeg, static_cast<unsigned long>(size));
+  jpeg_read_header(&cinfo, TRUE);
+  if (static_cast<int>(cinfo.image_width) != width ||
+      static_cast<int>(cinfo.image_height) != height) {
     if (error) {
       std::ostringstream message;
-      message << "JPEG is " << bgr.cols << "x" << bgr.rows << ", expected " << width << "x"
-              << height;
+      message << "JPEG is " << cinfo.image_width << "x" << cinfo.image_height << ", expected "
+              << width << "x" << height;
       *error = message.str();
     }
+    jpeg_destroy_decompress(&cinfo);
     return false;
   }
+  cinfo.out_color_space = JCS_RGB;
+  cinfo.dct_method = JDCT_IFAST;
+  cinfo.do_fancy_upsampling = FALSE;
+  jpeg_start_decompress(&cinfo);
   rgb->resize(static_cast<size_t>(width) * height * 3);
-  cv::Mat out(height, width, CV_8UC3, rgb->data());
-  cv::cvtColor(bgr, out, cv::COLOR_BGR2RGB);
+  while (cinfo.output_scanline < cinfo.output_height) {
+    JSAMPROW row = rgb->data() + static_cast<size_t>(cinfo.output_scanline) * width * 3;
+    jpeg_read_scanlines(&cinfo, &row, 1);
+  }
+  jpeg_finish_decompress(&cinfo);
+  jpeg_destroy_decompress(&cinfo);
   return true;
 }
 

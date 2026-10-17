@@ -63,8 +63,9 @@ class ColorPipeline {
 
 const char *backendName(ColorPipeline::Backend backend);
 
-// libjpeg through OpenCV: the codec of the CPU backends, and the encoder the
-// driver uses for rectified colour when the GPU pipeline is off.
+// libjpeg: the codec of the CPU backends, and the encoder the driver uses
+// for rectified colour when the GPU pipeline is off. The decode is the
+// SDK's, bit for bit.
 bool decodeJpegRgbCpu(const uint8_t *jpeg, size_t size, int width, int height,
                       std::vector<uint8_t> *rgb, std::string *error);
 bool encodeRgbJpegCpu(const uint8_t *rgb, int width, int height, int quality,
