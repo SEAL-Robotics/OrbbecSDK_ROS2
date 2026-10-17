@@ -5828,9 +5828,14 @@ void OBCameraNode::setupImagePublisher(const stream_index_pair &stream_index) {
   }
 
   const auto image_qos_profile = getImageQosProfile(stream_index);
+  // The undistortion filter hands on decoded RGB, so the camera's JPEG never
+  // reaches the passthrough and its topic would be advertised but never sent.
+  const auto undistortion = enable_undistortion_.find(stream_index);
+  const bool is_undistorted =
+      undistortion != enable_undistortion_.end() && undistortion->second;
   const bool is_mjpg_color_stream =
       (stream_index == COLOR || stream_index == COLOR_LEFT || stream_index == COLOR_RIGHT) &&
-      format_[stream_index] == OB_FORMAT_MJPG;
+      format_[stream_index] == OB_FORMAT_MJPG && !is_undistorted;
   const bool uses_image_transport = !use_intra_process_ && !is_mjpg_color_stream;
   if (use_intra_process_ || is_mjpg_color_stream) {
     releaseGlobalImageTransportPublisher(*node_, topic);
