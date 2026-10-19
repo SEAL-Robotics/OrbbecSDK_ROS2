@@ -441,9 +441,6 @@ void OBCameraNodeDriver::init() {
     device_status_timer_ =
         this->create_wall_timer(std::chrono::seconds(1), [this]() { deviceStatusTimer(); });
     auto qos = rclcpp::QoS(1).transient_local();
-    if (node_options_.use_intra_process_comms()) {
-      qos = rclcpp::QoS(1);
-    }
     device_status_pub_ =
         this->create_publisher<orbbec_camera_msgs::msg::DeviceStatus>("device_status", qos);
   }

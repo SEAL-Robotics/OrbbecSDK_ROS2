@@ -7,6 +7,9 @@ from launch_ros.actions import PushRosNamespace, ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
 
+# SEAL: launch-only arguments, not node parameters.
+CONTAINER_ARGS = {'use_intra_process_comms', 'container_executable'}
+
 OPTIONAL_BOOLEAN_PARAMS = {
     'enable_hardware_noise_removal_filter',
     'enable_noise_removal_filter',
@@ -53,6 +56,8 @@ def load_parameters(context, args):
 
     result = {}
     for key, value in default_params.items():
+        if key in CONTAINER_ARGS:
+            continue
         # An empty optional boolean means "auto". Do not pass it to the ROS node,
         # because a declared bool parameter cannot represent an unset value.
         if key in OPTIONAL_BOOLEAN_PARAMS and value == '':
@@ -296,6 +301,11 @@ def generate_launch_description():
         # SEAL: the GPU image pipeline (gpu_image_pipeline.h) and the JPEG
         # quality of the rectified colour on color/image_raw/compressed.
         DeclareLaunchArgument('gpu_pipeline', default_value='false'),
+        # SEAL: intra-process delivery to other components loaded into
+        # camera_container; component_container_mt lets them run beside the
+        # driver's callbacks.
+        DeclareLaunchArgument('use_intra_process_comms', default_value='false'),
+        DeclareLaunchArgument('container_executable', default_value='component_container'),
         DeclareLaunchArgument('gpu_speckle_filter', default_value='false'),
         DeclareLaunchArgument('gpu_depth_alignment', default_value='true'),
         DeclareLaunchArgument('gpu_color', default_value='true'),
@@ -394,13 +404,17 @@ def generate_launch_description():
                         name="camera_container",
                         namespace="",
                         package="rclcpp_components",
-                        executable="component_container",
+                        executable=LaunchConfiguration("container_executable"),
                         composable_node_descriptions=[
                             ComposableNode(
                                 package="orbbec_camera",
                                 plugin="orbbec_camera::OBCameraNodeDriver",
                                 name=LaunchConfiguration("camera_name"),
                                 parameters=params,
+                                extra_arguments=[{
+                                    "use_intra_process_comms": LaunchConfiguration(
+                                        "use_intra_process_comms").perform(context) == "true",
+                                }],
                             ),
                         ],
                         output="log",

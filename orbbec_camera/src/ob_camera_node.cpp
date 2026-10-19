@@ -5897,11 +5897,20 @@ void OBCameraNode::setupImagePublisher(const stream_index_pair &stream_index) {
   }
 }
 
+// SEAL: intra-process delivery keeps every configured QoS (rclcpp carries
+// transient-local intra-process); it refuses only keep-all history.
+rmw_qos_profile_t OBCameraNode::intraProcessCompatible(rmw_qos_profile_t qos) const {
+  if (use_intra_process_ && qos.history == RMW_QOS_POLICY_HISTORY_KEEP_ALL) {
+    RCLCPP_WARN_STREAM(logger_, "keep-all history is not allowed intra-process; keeping the last "
+                                    << std::max<size_t>(qos.depth, 10) << " instead");
+    qos.history = RMW_QOS_POLICY_HISTORY_KEEP_LAST;
+    qos.depth = std::max<size_t>(qos.depth, 10);
+  }
+  return qos;
+}
+
 rmw_qos_profile_t OBCameraNode::getImageQosProfile(const stream_index_pair &stream_index) const {
   auto image_qos_profile = getRMWQosProfileFromString(image_qos_.at(stream_index));
-  if (use_intra_process_) {
-    image_qos_profile = rmw_qos_profile_default;
-  }
   const auto &history = image_qos_history_.at(stream_index);
   if (history == "KEEP_LAST") {
     image_qos_profile.history = RMW_QOS_POLICY_HISTORY_KEEP_LAST;
@@ -5912,16 +5921,14 @@ rmw_qos_profile_t OBCameraNode::getImageQosProfile(const stream_index_pair &stre
   if (depth > 0) {
     image_qos_profile.depth = static_cast<size_t>(depth);
   }
-  return image_qos_profile;
+  return intraProcessCompatible(image_qos_profile);
 }
 
 void OBCameraNode::setupPublishers() {
   using PointCloud2 = sensor_msgs::msg::PointCloud2;
   using CameraInfo = sensor_msgs::msg::CameraInfo;
-  auto point_cloud_qos_profile = getRMWQosProfileFromString(point_cloud_qos_);
-  if (use_intra_process_) {
-    point_cloud_qos_profile = rmw_qos_profile_default;
-  }
+  auto point_cloud_qos_profile =
+      intraProcessCompatible(getRMWQosProfileFromString(point_cloud_qos_));
   if (enable_colored_point_cloud_) {
     depth_registration_cloud_pub_ = node_->create_publisher<PointCloud2>(
         "depth_registered/points",
@@ -5956,10 +5963,8 @@ void OBCameraNode::setupPublishers() {
 
     std::string topic = name + "/camera_info";
     auto camera_info_qos = camera_info_qos_[stream_index];
-    auto camera_info_qos_profile = getRMWQosProfileFromString(camera_info_qos);
-    if (use_intra_process_) {
-      camera_info_qos_profile = rmw_qos_profile_default;
-    }
+    auto camera_info_qos_profile =
+        intraProcessCompatible(getRMWQosProfileFromString(camera_info_qos));
     camera_info_publishers_[stream_index] = node_->create_publisher<CameraInfo>(
         topic, rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(camera_info_qos_profile),
                            camera_info_qos_profile));
@@ -5982,10 +5987,7 @@ void OBCameraNode::setupPublishers() {
 
   if (enable_sync_output_accel_gyro_) {
     std::string topic_name = stream_name_[GYRO] + "_" + stream_name_[ACCEL] + "/sample";
-    auto data_qos = getRMWQosProfileFromString(imu_qos_[GYRO]);
-    if (use_intra_process_) {
-      data_qos = rmw_qos_profile_default;
-    }
+    auto data_qos = intraProcessCompatible(getRMWQosProfileFromString(imu_qos_[GYRO]));
     imu_gyro_accel_publisher_ = node_->create_publisher<sensor_msgs::msg::Imu>(
         topic_name, rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(data_qos), data_qos));
     const auto publisher = imu_gyro_accel_publisher_;
@@ -6003,10 +6005,7 @@ void OBCameraNode::setupPublishers() {
         continue;
       }
       std::string data_topic_name = stream_name_[stream_index] + "/sample";
-      auto data_qos = getRMWQosProfileFromString(imu_qos_[stream_index]);
-      if (use_intra_process_) {
-        data_qos = rmw_qos_profile_default;
-      }
+      auto data_qos = intraProcessCompatible(getRMWQosProfileFromString(imu_qos_[stream_index]));
       imu_publishers_[stream_index] = node_->create_publisher<sensor_msgs::msg::Imu>(
           data_topic_name, rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(data_qos), data_qos));
       const auto publisher = imu_publishers_.at(stream_index);
@@ -6021,9 +6020,6 @@ void OBCameraNode::setupPublishers() {
     }
   }
   auto extrinsics_qos = rclcpp::QoS(1).transient_local();
-  if (use_intra_process_) {
-    extrinsics_qos = rclcpp::QoS(1);
-  }
   if (enable_stream_[DEPTH] && enable_stream_[INFRA0] && enable_publish_extrinsic_) {
     depth_to_other_extrinsics_publishers_[INFRA0] =
         node_->create_publisher<orbbec_camera_msgs::msg::Extrinsics>("depth_to_ir", extrinsics_qos);

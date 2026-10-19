@@ -340,6 +340,7 @@ class OBCameraNode {
 
   void setupImagePublisher(const stream_index_pair& stream_index);
 
+  rmw_qos_profile_t intraProcessCompatible(rmw_qos_profile_t qos) const;
   rmw_qos_profile_t getImageQosProfile(const stream_index_pair& stream_index) const;
 
   void setupPipelineConfig();
