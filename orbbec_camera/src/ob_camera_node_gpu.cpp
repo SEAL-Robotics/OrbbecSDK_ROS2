@@ -132,7 +132,7 @@ bool OBCameraNode::imageWanted(const stream_index_pair &stream_index) {
   const bool has_explicit_compressed_publisher =
       compressed_image_publishers_.count(stream_index) > 0 &&
       compressed_image_publishers_.at(stream_index);
-  if (!use_intra_process_ && !has_explicit_compressed_publisher) {
+  if (!has_explicit_compressed_publisher) {
     return node_->count_subscribers(stream_name_[stream_index] + "/image_raw") > 0;
   }
   return image_publishers_.count(stream_index) && image_publishers_.at(stream_index) &&

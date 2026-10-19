@@ -70,6 +70,11 @@ if(DEFINED image_transport_VERSION AND image_transport_VERSION VERSION_GREATER_E
     set(ORBBEC_IMAGE_TRANSPORT_USES_REQUIRED_INTERFACES ON)
 endif()
 
+set(ORBBEC_IMAGE_TRANSPORT_PUBLISHES_UNIQUE_PTR OFF)
+if(DEFINED image_transport_VERSION AND image_transport_VERSION VERSION_GREATER_EQUAL 5.0)
+    set(ORBBEC_IMAGE_TRANSPORT_PUBLISHES_UNIQUE_PTR ON)
+endif()
+
 set(ORBBEC_CAMERA_INFO_MANAGER_USES_NODE_INTERFACES OFF)
 if(DEFINED camera_info_manager_VERSION AND
    camera_info_manager_VERSION VERSION_GREATER_EQUAL 4.1.0)
@@ -331,6 +336,9 @@ endif()
 if(ORBBEC_IMAGE_TRANSPORT_USES_REQUIRED_INTERFACES)
     target_compile_definitions(${PROJECT_NAME} PRIVATE ORBBEC_IMAGE_TRANSPORT_USES_REQUIRED_INTERFACES)
 endif()
+if(ORBBEC_IMAGE_TRANSPORT_PUBLISHES_UNIQUE_PTR)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE ORBBEC_IMAGE_TRANSPORT_PUBLISHES_UNIQUE_PTR)
+endif()
 if(ORBBEC_CAMERA_INFO_MANAGER_USES_NODE_INTERFACES)
     target_compile_definitions(${PROJECT_NAME}
         PRIVATE ORBBEC_CAMERA_INFO_MANAGER_USES_NODE_INTERFACES)
@@ -529,10 +537,10 @@ if(BUILD_TESTING)
     ament_add_gtest(gpu_color_math_test test/gpu/test_color_math.cpp)
     target_link_libraries(gpu_color_math_test orbbec_gpu_pipeline JPEG::JPEG)
     find_package(std_msgs REQUIRED)
-    ament_add_gtest(intra_process_qos_test test/test_intra_process_qos.cpp TIMEOUT 60
-        ENV ROS_DOMAIN_ID=117 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST CYCLONEDDS_URI=)
-    target_link_libraries(intra_process_qos_test rclcpp::rclcpp ${sensor_msgs_TARGETS}
-        ${std_msgs_TARGETS})
+    ament_add_gtest(intra_process_qos_test test/test_intra_process_qos.cpp TIMEOUT 90
+        ENV ROS_DOMAIN_ID=118 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST CYCLONEDDS_URI=)
+    target_link_directories(intra_process_qos_test PRIVATE ${ORBBEC_LIBS_DIR})
+    target_link_libraries(intra_process_qos_test ${PROJECT_NAME} ${std_msgs_TARGETS})
     # A node of its own: kept off the robot's DDS domains.
     ament_add_gtest(gpu_image_pipeline_test test/gpu/test_gpu_image_pipeline.cpp TIMEOUT 120
         ENV ROS_DOMAIN_ID=117 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST CYCLONEDDS_URI=)

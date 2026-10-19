@@ -90,7 +90,13 @@ image_transport_publisher::image_transport_publisher(rclcpp::Node& node,
           ));
 }
 void image_transport_publisher::publish(sensor_msgs::msg::Image::UniquePtr image_ptr) {
+#ifdef ORBBEC_IMAGE_TRANSPORT_PUBLISHES_UNIQUE_PTR
+  // The raw plugin takes ownership, so an intra-process reader gets this
+  // frame without a copy.
+  image_publisher_impl->publish(std::move(image_ptr));
+#else
   image_publisher_impl->publish(*image_ptr);
+#endif
 }
 
 size_t image_transport_publisher::get_subscription_count() const {

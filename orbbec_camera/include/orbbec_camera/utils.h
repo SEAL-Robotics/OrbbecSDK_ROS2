@@ -188,6 +188,12 @@ std::string ObDeviceTypeToString(const OBDeviceType& type);
 
 rmw_qos_profile_t getRMWQosProfileFromString(const std::string& str_qos);
 
+// SEAL: qos as intra-process delivery accepts it. rclcpp carries every
+// reliability and durability intra-process but only an explicit keep-last
+// history with a depth, so anything else (keep-all, system default, depth 0)
+// becomes keep-last of at least 10.
+rmw_qos_profile_t intraProcessQos(rmw_qos_profile_t qos);
+
 std::string getRMWQosProfileDescription(const rmw_qos_profile_t& qos_profile);
 
 bool isOpenNIDevice(int pid);

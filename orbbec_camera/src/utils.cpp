@@ -544,6 +544,14 @@ std::string ObDeviceTypeToString(const OBDeviceType &type) {
   return "unknown technology camera";
 }
 
+rmw_qos_profile_t intraProcessQos(rmw_qos_profile_t qos) {
+  if (qos.history != RMW_QOS_POLICY_HISTORY_KEEP_LAST || qos.depth == 0) {
+    qos.history = RMW_QOS_POLICY_HISTORY_KEEP_LAST;
+    qos.depth = std::max<size_t>(qos.depth, 10);
+  }
+  return qos;
+}
+
 rmw_qos_profile_t getRMWQosProfileFromString(const std::string &str_qos) {
   std::string upper_str_qos = str_qos;
   std::transform(upper_str_qos.begin(), upper_str_qos.end(), upper_str_qos.begin(), ::toupper);

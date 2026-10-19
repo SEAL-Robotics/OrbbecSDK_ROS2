@@ -5856,8 +5856,11 @@ void OBCameraNode::setupImagePublisher(const stream_index_pair &stream_index) {
   const bool is_mjpg_color_stream =
       (stream_index == COLOR || stream_index == COLOR_LEFT || stream_index == COLOR_RIGHT) &&
       format_[stream_index] == OB_FORMAT_MJPG;
-  const bool uses_image_transport = !use_intra_process_ && !is_mjpg_color_stream;
-  if (use_intra_process_ || is_mjpg_color_stream) {
+  // Intra-process too: image_transport hands its raw plugin the unique_ptr,
+  // so in-container readers still get the frame without a copy, and the
+  // plugin topics (compressed, compressedDepth) stay.
+  const bool uses_image_transport = !is_mjpg_color_stream;
+  if (is_mjpg_color_stream) {
     releaseGlobalImageTransportPublisher(*node_, topic);
     image_publishers_[stream_index] =
         std::make_shared<image_rcl_publisher>(*node_, topic, image_qos_profile);
@@ -5898,15 +5901,18 @@ void OBCameraNode::setupImagePublisher(const stream_index_pair &stream_index) {
 }
 
 // SEAL: intra-process delivery keeps every configured QoS (rclcpp carries
-// transient-local intra-process); it refuses only keep-all history.
+// transient-local intra-process) except a history it refuses.
 rmw_qos_profile_t OBCameraNode::intraProcessCompatible(rmw_qos_profile_t qos) const {
-  if (use_intra_process_ && qos.history == RMW_QOS_POLICY_HISTORY_KEEP_ALL) {
-    RCLCPP_WARN_STREAM(logger_, "keep-all history is not allowed intra-process; keeping the last "
-                                    << std::max<size_t>(qos.depth, 10) << " instead");
-    qos.history = RMW_QOS_POLICY_HISTORY_KEEP_LAST;
-    qos.depth = std::max<size_t>(qos.depth, 10);
+  if (!use_intra_process_) {
+    return qos;
   }
-  return qos;
+  const auto compatible = intraProcessQos(qos);
+  if (compatible.history != qos.history || compatible.depth != qos.depth) {
+    RCLCPP_WARN_STREAM(logger_, "intra-process delivery takes only keep-last history with a "
+                                "depth; keeping the last "
+                                    << compatible.depth << " instead");
+  }
+  return compatible;
 }
 
 rmw_qos_profile_t OBCameraNode::getImageQosProfile(const stream_index_pair &stream_index) const {
@@ -6086,13 +6092,8 @@ void OBCameraNode::syncSoftwareAlignment() {
     }
     if (!depth_unaligned_publisher_) {
       const auto depth_image_qos_profile = getImageQosProfile(DEPTH);
-      if (use_intra_process_) {
-        depth_unaligned_publisher_ = std::make_shared<image_rcl_publisher>(
-            *node_, "depth/image_unaligned", depth_image_qos_profile);
-      } else {
-        depth_unaligned_publisher_ = getGlobalImageTransportPublisher(
-            *node_, "depth/image_unaligned", depth_image_qos_profile);
-      }
+      depth_unaligned_publisher_ = getGlobalImageTransportPublisher(
+          *node_, "depth/image_unaligned", depth_image_qos_profile);
     }
     return;
   }
@@ -7381,7 +7382,7 @@ void OBCameraNode::onNewFrameCallback(const std::shared_ptr<ob::Frame> &frame,
       compressed_image_publishers_.count(stream_index) > 0 &&
       compressed_image_publishers_.at(stream_index);
   bool has_raw_image_subscriber = image_publishers_[stream_index]->get_subscription_count() > 0;
-  if (!use_intra_process_ && !has_explicit_compressed_publisher) {
+  if (!has_explicit_compressed_publisher) {
     has_raw_image_subscriber =
         node_->count_subscribers(stream_name_[stream_index] + "/image_raw") > 0;
   }
@@ -7620,9 +7621,6 @@ bool OBCameraNode::hasCompressedImageSubscriber(const stream_index_pair &stream_
   auto it = compressed_image_publishers_.find(stream_index);
   if (it != compressed_image_publishers_.end() && it->second) {
     return it->second->get_subscription_count() > 0;
-  }
-  if (use_intra_process_) {
-    return false;
   }
   return node_->count_subscribers(compressedStreamStatusTopic(stream_index)) > 0;
 }
