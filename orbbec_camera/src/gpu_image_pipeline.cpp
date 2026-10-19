@@ -79,6 +79,11 @@ struct GpuImagePipeline::StageStats {
   std::map<std::string, Value> values;
 };
 
+struct GpuImagePipeline::Stats {
+  std::mutex mutex;
+  std::map<std::string, std::unique_ptr<StageStats>> stages;
+};
+
 bool GpuImagePipeline::available(std::string *reason) {
 #if defined(ORBBEC_WITH_CUDA)
   return gpu::cudaDeviceAvailable(reason);
@@ -89,7 +94,10 @@ bool GpuImagePipeline::available(std::string *reason) {
 }
 
 GpuImagePipeline::GpuImagePipeline(rclcpp::Node *node, const Options &options)
-    : node_(node), logger_(node->get_logger().get_child("gpu_pipeline")), options_(options) {
+    : node_(node),
+      logger_(node->get_logger().get_child("gpu_pipeline")),
+      options_(options),
+      stats_(std::make_shared<Stats>()) {
   options_.compare_every_n = std::max(1, options_.compare_every_n);
   setSpeckle(true, options_.speckle.max_diff, options_.speckle.max_size);
   RCLCPP_INFO_STREAM(logger_, "GPU image pipeline: speckle filter "
@@ -106,10 +114,12 @@ GpuImagePipeline::GpuImagePipeline(rclcpp::Node *node, const Options &options)
   if (options_.compare) {
     comparison_pub_ = node_->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
         "gpu_pipeline/comparison", rclcpp::QoS(10));
+    auto stats = stats_;
+    auto logger = logger_;
     summary_timer_ = node_->create_wall_timer(
-        std::chrono::duration<double>(kSummaryPeriodS), [this]() {
-          std::lock_guard<std::mutex> lock(stats_mutex_);
-          for (const auto &stage : stats_) {
+        std::chrono::duration<double>(kSummaryPeriodS), [stats, logger]() {
+          std::lock_guard<std::mutex> lock(stats->mutex);
+          for (const auto &stage : stats->stages) {
             std::ostringstream line;
             line << "SDK vs GPU, " << stage.first << ": " << stage.second->frames << " frames";
             for (const auto &value : stage.second->values) {
@@ -117,23 +127,55 @@ GpuImagePipeline::GpuImagePipeline(rclcpp::Node *node, const Options &options)
               line << ", " << value.first << " min " << v.min << " mean "
                    << (v.count ? v.sum / static_cast<double>(v.count) : 0.0) << " max " << v.max;
             }
-            RCLCPP_INFO_STREAM(logger_, line.str());
+            RCLCPP_INFO_STREAM(logger, line.str());
           }
         });
+  }
+  // Built up front, so a failed GPU filter has the SDK's to fall back on.
+  if (options_.speckle_filter) {
+    ensureSdkNoiseFilter();
   }
 }
 
 GpuImagePipeline::~GpuImagePipeline() {
-  // The timer's callback holds this object.
   if (summary_timer_) {
     summary_timer_->cancel();
     summary_timer_.reset();
   }
 }
 
-void GpuImagePipeline::logFailure(const char *stage, const std::string &error) {
+void GpuImagePipeline::logFailure(const char *stage, const std::string &error,
+                                  const char *outcome) {
   RCLCPP_ERROR_STREAM_THROTTLE(logger_, *node_->get_clock(), 5000,
-                               "GPU " << stage << " failed, the SDK does this frame: " << error);
+                               "GPU " << stage << " failed, " << outcome << ": " << error);
+}
+
+bool GpuImagePipeline::ensureSdkNoiseFilter() {
+  if (!sdk_noise_filter_tried_) {
+    sdk_noise_filter_tried_ = true;
+    try {
+      sdk_noise_filter_ = ob::FilterFactory::createFilter("NoiseRemovalFilter");
+      sdk_noise_filter_->enable(true);
+    } catch (const std::exception &e) {
+      RCLCPP_WARN_STREAM(logger_, "the SDK's NoiseRemovalFilter is unavailable here ("
+                                      << e.what()
+                                      << "): a frame the GPU filter fails on is dropped, and "
+                                         "the comparison sees the filter through the "
+                                         "alignment only");
+    }
+  }
+  if (!sdk_noise_filter_) {
+    return false;
+  }
+  for (const auto &item : sdk_noise_filter_->getConfigSchemaVec()) {
+    const std::string name = item.name;
+    if (name == "max_size") {
+      sdk_noise_filter_->setConfigValue(name, speckle_max_size_.load());
+    } else if (name == "min_diff") {
+      sdk_noise_filter_->setConfigValue(name, speckle_max_diff_.load());
+    }
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,19 +203,41 @@ void GpuImagePipeline::ensureDepthPipeline() {
 
 std::shared_ptr<ob::Frame> GpuImagePipeline::filterDepth(const std::shared_ptr<ob::Frame> &raw,
                                                          bool data_wanted) {
+  std::string error;
+  auto filtered = gpuFilterDepth(raw, data_wanted, &error);
+  if (filtered) {
+    return filtered;
+  }
+  if (ensureSdkNoiseFilter()) {
+    try {
+      filtered = sdk_noise_filter_->process(raw);
+    } catch (const std::exception &e) {
+      error += std::string("; the SDK's filter failed too: ") + e.what();
+    }
+    if (filtered && filtered->getDataSize() == raw->getDataSize()) {
+      logFailure("speckle filter", error, "the SDK's NoiseRemovalFilter does this frame");
+      return filtered;
+    }
+  }
+  logFailure("speckle filter", error, "frame dropped, never published unfiltered");
+  return nullptr;
+}
+
+std::shared_ptr<ob::Frame> GpuImagePipeline::gpuFilterDepth(const std::shared_ptr<ob::Frame> &raw,
+                                                            bool data_wanted, std::string *error) {
   ensureDepthPipeline();
   auto video = raw->as<ob::VideoFrame>();
   const int width = static_cast<int>(video->getWidth());
   const int height = static_cast<int>(video->getHeight());
   const size_t pixels = static_cast<size_t>(width) * height;
   if (raw->getFormat() != OB_FORMAT_Y16 && raw->getFormat() != OB_FORMAT_Z16) {
-    logFailure("speckle filter", "depth format is not 16-bit");
+    *error = "depth format is not 16-bit";
     return nullptr;
   }
   auto filtered = ob::FrameFactory::createFrameFromOtherFrame(raw, false);
   if (raw->getDataSize() < pixels * sizeof(uint16_t) ||
       filtered->getDataSize() < pixels * sizeof(uint16_t)) {
-    logFailure("speckle filter", "depth frame buffer is smaller than its resolution");
+    *error = "depth frame buffer is smaller than its resolution";
     return nullptr;
   }
   uint16_t *out = reinterpret_cast<uint16_t *>(filtered->getData());
@@ -182,10 +246,8 @@ std::shared_ptr<ob::Frame> GpuImagePipeline::filterDepth(const std::shared_ptr<o
     return filtered;
   }
   depth_->setSpeckle({speckle_max_diff_.load(), speckle_max_size_.load()});
-  std::string error;
   if (!depth_->process(reinterpret_cast<const uint16_t *>(raw->getData()), width, height, true,
-                       out, nullptr, &error)) {
-    logFailure("speckle filter", error);
+                       out, nullptr, error)) {
     return nullptr;
   }
   if (compare_depth_now_) {
@@ -216,7 +278,12 @@ bool GpuImagePipeline::ensureDepthConfig(const std::shared_ptr<ob::Frame> &depth
   if (key == depth_key_ && aligned_profile_ && depth_->hasAlignment()) {
     return true;
   }
+  if (key == depth_failed_key_) {
+    return false;
+  }
   depth_key_.clear();
+  depth_failed_key_ = key;
+  ++depth_setups_;
 
   // The output profile is whatever the SDK's own alignment gives its output.
   auto sdk_aligned = sdkAlign(sdk_align, depth, color);
@@ -274,6 +341,7 @@ bool GpuImagePipeline::ensureDepthConfig(const std::shared_ptr<ob::Frame> &depth
     return false;
   }
   depth_key_ = key;
+  depth_failed_key_.clear();
   RCLCPP_INFO_STREAM(logger_, "depth alignment set up: depth "
                                   << config.depth_intrinsic.width << "x"
                                   << config.depth_intrinsic.height << " to colour "
@@ -321,29 +389,7 @@ std::shared_ptr<ob::Frame> GpuImagePipeline::alignDepth(const std::shared_ptr<ob
 
 void GpuImagePipeline::compareSpeckle(const std::shared_ptr<ob::Frame> &raw,
                                       const uint16_t *gpu_filtered) {
-  if (!sdk_noise_filter_tried_) {
-    sdk_noise_filter_tried_ = true;
-    try {
-      auto filter = ob::FilterFactory::createFilter("NoiseRemovalFilter");
-      for (const auto &item : filter->getConfigSchemaVec()) {
-        const std::string name = item.name;
-        if (name == "max_size") {
-          filter->setConfigValue(name, speckle_max_size_.load());
-        } else if (name == "min_diff") {
-          filter->setConfigValue(name, speckle_max_diff_.load());
-        }
-      }
-      filter->enable(true);
-      sdk_noise_filter_ = filter;
-      RCLCPP_INFO_STREAM(logger_, "comparing the speckle filter with the SDK's NoiseRemovalFilter");
-    } catch (const std::exception &e) {
-      RCLCPP_WARN_STREAM(logger_, "the SDK's NoiseRemovalFilter is unavailable here ("
-                                      << e.what()
-                                      << "): the speckle filter is compared through the "
-                                         "alignment only");
-    }
-  }
-  if (!sdk_noise_filter_) {
+  if (!ensureSdkNoiseFilter()) {
     return;
   }
   std::shared_ptr<ob::Frame> sdk;
@@ -415,7 +461,12 @@ bool GpuImagePipeline::ensureColorConfig(const std::shared_ptr<ob::Frame> &mjpg)
   if (key == color_key_ && rectified_profile_) {
     return true;
   }
+  if (key == color_failed_key_) {
+    return false;
+  }
   color_key_.clear();
+  color_failed_key_ = key;
+  ++color_setups_;
   if (distortionIsTrivial(distortion)) {
     logFailure("colour", "the colour stream has no distortion; the SDK passes it through");
     return false;
@@ -450,6 +501,7 @@ bool GpuImagePipeline::ensureColorConfig(const std::shared_ptr<ob::Frame> &mjpg)
     return false;
   }
   color_key_ = key;
+  color_failed_key_.clear();
   RCLCPP_INFO_STREAM(logger_, "colour undistortion set up for " << intrinsic.width << "x"
                                                                << intrinsic.height);
   return true;
@@ -530,8 +582,8 @@ void GpuImagePipeline::record(const std::string &stage,
   status.name = "gpu_pipeline/" + stage;
   status.message = "SDK CPU path vs GPU path, same frame";
   {
-    std::lock_guard<std::mutex> lock(stats_mutex_);
-    auto &stats = stats_[stage];
+    std::lock_guard<std::mutex> lock(stats_->mutex);
+    auto &stats = stats_->stages[stage];
     if (!stats) {
       stats = std::make_unique<StageStats>();
     }

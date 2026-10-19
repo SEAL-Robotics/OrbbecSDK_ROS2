@@ -19,6 +19,9 @@ void OBCameraNode::resolveGpuPipeline() {
   gpu_speckle_filter_active_ = false;
   gpu_depth_alignment_active_ = false;
   gpu_color_active_ = false;
+  // The device settings sync reads the filter switch back from the device,
+  // where the GPU filter turned it off; this is what was asked for.
+  configured_noise_removal_filter_ = enable_noise_removal_filter_;
   if (!gpu_pipeline_) {
     return;
   }
@@ -40,6 +43,7 @@ void OBCameraNode::resolveGpuPipeline() {
 
 void OBCameraNode::createGpuPipeline() {
   gpu_.reset();
+  enable_noise_removal_filter_ = configured_noise_removal_filter_;
   if (!gpu_speckle_filter_active_ && !gpu_depth_alignment_active_ && !gpu_color_active_) {
     return;
   }
@@ -69,7 +73,8 @@ void OBCameraNode::createGpuPipeline() {
     gpu_speckle_filter_active_ = false;
     // setupDevices turned the SDK's filter off for the GPU; depth is never
     // left unfiltered.
-    setSdkNoiseRemovalFilter(enable_noise_removal_filter_);
+    setSdkNoiseRemovalFilter(
+        sdkNoiseRemovalFilterOn(configured_noise_removal_filter_, gpu_speckle_filter_active_));
   }
   gpu_ = std::make_unique<GpuImagePipeline>(node_, options);
 }
@@ -105,8 +110,9 @@ bool OBCameraNode::applyNoiseRemovalToGpu(bool enabled, int min_diff, int max_si
     }
     return true;
   };
-  if (!check(OB_PROP_DEPTH_MAX_DIFF_INT, min_diff, "min_diff") ||
-      !check(OB_PROP_DEPTH_MAX_SPECKLE_SIZE_INT, max_size, "max_size")) {
+  // Switching the filter off needs no valid parameters.
+  if (enabled && (!check(OB_PROP_DEPTH_MAX_DIFF_INT, min_diff, "min_diff") ||
+                  !check(OB_PROP_DEPTH_MAX_SPECKLE_SIZE_INT, max_size, "max_size"))) {
     RCLCPP_ERROR_STREAM(logger_, *error);
     return true;
   }
@@ -160,9 +166,12 @@ void OBCameraNode::processGpuColorFrameSet(const std::shared_ptr<ob::FrameSet> &
         const auto timestamp = fromUsToROSTime(getFrameTimestampUs(rectified));
         publishJpegColorImage(std::move(jpeg), COLOR, timestamp, optical_frame_id_[COLOR]);
       }
+      struct JpegFlag {
+        bool &flag;
+        ~JpegFlag() { flag = false; }
+      } reset_on_exit{color_jpeg_published_by_gpu_};
       color_jpeg_published_by_gpu_ = true;
       onNewFrameCallback(rectified, COLOR);
-      color_jpeg_published_by_gpu_ = false;
       return;
     }
   } else {

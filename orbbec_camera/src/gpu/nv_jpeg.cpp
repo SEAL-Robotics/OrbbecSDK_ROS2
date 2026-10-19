@@ -424,10 +424,7 @@ bool NvJpegHardware::decode(const uint8_t *jpeg, size_t size, YcbcrPlanes *plane
   return true;
 }
 
-void NvJpegHardware::releaseDecoded() {
-  cudaFree(nullptr);
-  impl_->releaseDecoded();
-}
+void NvJpegHardware::releaseDecoded() { impl_->releaseDecoded(); }
 
 const Yuv420Planes &NvJpegHardware::encodeInput() const { return impl_->yuv_planes; }
 

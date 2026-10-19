@@ -95,6 +95,62 @@ TEST(GpuImagePipelineOptions, NoiseFilterStaysTheSdksUnlessAskedFor) {
   EXPECT_TRUE(GpuImagePipeline::Options{}.color);
 }
 
+TEST(GpuImagePipelineOptions, DeviceNoiseFilterRunsWheneverTheGpuOneDoesNot) {
+  EXPECT_TRUE(sdkNoiseRemovalFilterOn(true, false));
+  EXPECT_FALSE(sdkNoiseRemovalFilterOn(true, true));
+  EXPECT_FALSE(sdkNoiseRemovalFilterOn(false, false));
+  EXPECT_FALSE(sdkNoiseRemovalFilterOn(false, true));
+}
+
+TEST_F(GpuImagePipelineTest, AFailedNoiseFilterNeverHandsBackRawDepth) {
+  GpuImagePipeline::Options options;
+  options.speckle_filter = true;
+  GpuImagePipeline pipeline(node_.get(), options);
+  // An 8-bit "depth" the GPU filter refuses. Without the camera the SDK's
+  // private filter cannot stand in, so the frame must be dropped.
+  auto profile = makeProfile(OB_STREAM_DEPTH, OB_FORMAT_Y8, depth_intrinsic_, {});
+  auto raw = ob::FrameFactory::createFrameFromStreamProfile(profile);
+  pipeline.startDepthFrame();
+  auto filtered = pipeline.filterDepth(raw, true);
+  EXPECT_EQ(filtered, nullptr);
+}
+
+TEST_F(GpuImagePipelineTest, AFailedColourSetUpIsNotRetriedEveryFrame) {
+  GpuImagePipeline pipeline(node_.get(), GpuImagePipeline::Options{});
+  const auto jpeg = gpu::test::encodeJpeg(
+      gpu::test::makeColor(kWidth, kHeight, 3, kWidth * 3), kWidth, kHeight, 2, 1, 90);
+  // Intrinsics for another resolution than the stream's.
+  auto good_profile = color_profile_;
+  color_profile_ = makeProfile(OB_STREAM_COLOR, OB_FORMAT_MJPG, depth_intrinsic_,
+                               gpu::test::makeColorDistortion());
+  auto half = gpu::test::makeIntrinsic(kWidth / 2, kHeight / 2);
+  color_profile_->setIntrinsic(half);
+  std::shared_ptr<ob::Frame> rectified;
+  std::vector<uint8_t> encoded;
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_FALSE(pipeline.processColor(colorFrame(jpeg, i), true, false, &rectified, &encoded));
+  }
+  EXPECT_EQ(pipeline.colorSetupAttempts(), 1);
+  color_profile_ = good_profile;
+  EXPECT_TRUE(pipeline.processColor(colorFrame(jpeg, 9), true, false, &rectified, &encoded));
+  EXPECT_EQ(pipeline.colorSetupAttempts(), 2);
+}
+
+TEST_F(GpuImagePipelineTest, AFailedDepthSetUpIsNotRetriedEveryFrame) {
+  GpuImagePipeline pipeline(node_.get(), GpuImagePipeline::Options{});
+  depth_profile_->setIntrinsic(gpu::test::makeIntrinsic(kWidth / 2, kHeight / 2));
+  const auto depth = gpu::test::makeDepth(kWidth, kHeight);
+  const auto jpeg = gpu::test::encodeJpeg(
+      gpu::test::makeColor(kWidth, kHeight, 3, kWidth * 3), kWidth, kHeight, 2, 1, 90);
+  ob::Align sdk_align(OB_STREAM_COLOR);
+  for (int i = 0; i < 3; ++i) {
+    pipeline.startDepthFrame();
+    EXPECT_EQ(pipeline.alignDepth(depthFrame(depth, i), colorFrame(jpeg, i), sdk_align, true),
+              nullptr);
+  }
+  EXPECT_EQ(pipeline.depthSetupAttempts(), 1);
+}
+
 TEST_F(GpuImagePipelineTest, DepthMatchesSdkAlignmentWithItsProfileAndStamp) {
   GpuImagePipeline::Options options;
   options.speckle = {256, 200};

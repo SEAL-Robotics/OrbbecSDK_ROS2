@@ -1120,6 +1120,7 @@ class OBCameraNode {
   bool gpu_color_active_ = false;
   // Set around onNewFrameCallback while the GPU path publishes its own JPEG.
   bool color_jpeg_published_by_gpu_ = false;
+  bool configured_noise_removal_filter_ = true;
   std::unique_ptr<GpuImagePipeline> gpu_;
   std::shared_ptr<ob::EnhancedDepthFilter> enhanced_depth_filter_ = nullptr;
   ob::FormatConvertFilter enhanced_depth_format_convert_filter_;

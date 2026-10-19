@@ -1891,7 +1891,7 @@ void OBCameraNode::setupDevices() {
       device_->isPropertySupported(OB_PROP_DEPTH_SOFT_FILTER_BOOL, OB_PERMISSION_READ_WRITE)) {
     // With the GPU pipeline the filter runs on the GPU, so the SDK's stays off.
     const bool sdk_noise_removal_filter =
-        enable_noise_removal_filter_ && !gpu_speckle_filter_active_;
+        sdkNoiseRemovalFilterOn(enable_noise_removal_filter_, gpu_speckle_filter_active_);
     TRY_TO_SET_PROPERTY(setBoolProperty, OB_PROP_DEPTH_SOFT_FILTER_BOOL,
                         sdk_noise_removal_filter);
     RCLCPP_INFO_STREAM(logger_, "Set noise removal filter to "
@@ -6847,8 +6847,11 @@ void OBCameraNode::onNewFrameSetCallback(std::shared_ptr<ob::FrameSet> frame_set
       // The GPU's noise filter stands where the SDK's ran: before the
       // other depth filters and the alignment.
       if (gpu_ && gpu_speckle_filter_active_ && gpu_->speckleEnabled()) {
-        if (auto filtered = gpu_->filterDepth(depth_frame, depth_data_wanted)) {
-          depth_frame = filtered;
+        depth_frame = gpu_->filterDepth(depth_frame, depth_data_wanted);
+        if (!depth_frame) {
+          // Neither the GPU's filter nor the SDK's ran: drop the frameset
+          // rather than publish unfiltered depth.
+          return;
         }
       }
       depth_frame = processDepthFrameFilter(depth_frame);
