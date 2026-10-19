@@ -15,6 +15,7 @@
 #include <std_msgs/msg/string.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <chrono>
 #include <memory>
 #include <set>
@@ -109,6 +110,41 @@ std::set<std::string> topicsOf(const std::shared_ptr<rclcpp::Node> &node, const 
   return topics;
 }
 
+TEST_F(IntraProcess, EveryReaderGetsTheFrameWhenTheGateIsNotAlone) {
+  // The frame moved into image_transport must still reach a second reader,
+  // in-process or not: no reader may see a moved-from message.
+  auto driver = makeNode("shared_driver");
+  auto gate = makeNode("shared_gate");
+  auto other = makeNode("shared_other", false);
+  auto publisher = getGlobalImageTransportPublisher(*driver, "shared/depth/image_raw",
+                                                    rmw_qos_profile_default);
+  size_t gate_bytes = 0;
+  size_t other_bytes = 0;
+  auto gate_subscription = gate->create_subscription<sensor_msgs::msg::Image>(
+      "shared/depth/image_raw", rclcpp::SensorDataQoS(),
+      [&](sensor_msgs::msg::Image::ConstSharedPtr msg) { gate_bytes = msg->data.size(); });
+  auto other_subscription = other->create_subscription<sensor_msgs::msg::Image>(
+      "shared/depth/image_raw", rclcpp::SensorDataQoS(),
+      [&](sensor_msgs::msg::Image::ConstSharedPtr msg) { other_bytes = msg->data.size(); });
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(driver);
+  executor.add_node(gate);
+  executor.add_node(other);
+  spinUntil(executor, [&] { return publisher->get_subscription_count() >= 2; });
+
+  auto image = std::make_unique<sensor_msgs::msg::Image>();
+  image->encoding = "16UC1";
+  image->width = 64;
+  image->height = 40;
+  image->step = 128;
+  image->data.assign(64 * 40 * 2, 7);
+  publisher->publish(std::move(image));
+  spinUntil(executor, [&] { return gate_bytes != 0 && other_bytes != 0; });
+  EXPECT_EQ(gate_bytes, 64u * 40u * 2u);
+  EXPECT_EQ(other_bytes, 64u * 40u * 2u);
+  releaseGlobalImageTransportPublisher(*driver, "shared/depth/image_raw");
+}
+
 TEST_F(IntraProcess, ImageTransportPluginTopicsStay) {
   // Whatever plugins this host has (compressed, compressedDepth on the pod),
   // the intra-process driver offers the same topics as the DDS-only one.
@@ -170,14 +206,22 @@ TEST_F(IntraProcess, TransientLocalStillReachesALateSubscriber) {
 }
 
 TEST_F(IntraProcess, TheDriverRunsInAMultiThreadedContainer) {
-  // No camera here: the driver starts, looks for one and keeps serving.
+  // The driver opens any camera it finds, USB included, so this runs only
+  // where asked to, on a machine with none attached.
+  const char *enabled = std::getenv("ORBBEC_TEST_DRIVER_WITHOUT_CAMERA");
+  if (enabled == nullptr || std::string(enabled) != "1") {
+    GTEST_SKIP() << "set ORBBEC_TEST_DRIVER_WITHOUT_CAMERA=1 on a machine with no Orbbec attached";
+  }
   rclcpp::NodeOptions options;
   options.use_intra_process_comms(true);
   options.append_parameter_override("enumerate_net_device", false);
   auto driver = std::make_shared<OBCameraNodeDriver>(options);
   rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
   executor.add_node(driver);
-  spinUntil(executor, [] { return false; }, std::chrono::milliseconds(2000));
+  std::thread spinner([&executor] { executor.spin(); });
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+  executor.cancel();
+  spinner.join();
   EXPECT_TRUE(driver->get_node_options().use_intra_process_comms());
   EXPECT_FALSE(driver->get_fully_qualified_name() == std::string());
   executor.remove_node(driver);
