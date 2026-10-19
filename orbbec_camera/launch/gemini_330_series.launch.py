@@ -296,7 +296,7 @@ def generate_launch_description():
         # SEAL: the GPU image pipeline (gpu_image_pipeline.h) and the JPEG
         # quality of the rectified colour on color/image_raw/compressed.
         DeclareLaunchArgument('gpu_pipeline', default_value='false'),
-        DeclareLaunchArgument('gpu_speckle_filter', default_value='true'),
+        DeclareLaunchArgument('gpu_speckle_filter', default_value='false'),
         DeclareLaunchArgument('gpu_depth_alignment', default_value='true'),
         DeclareLaunchArgument('gpu_color', default_value='true'),
         DeclareLaunchArgument('gpu_compare', default_value='false'),

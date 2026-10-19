@@ -89,6 +89,12 @@ class GpuImagePipelineTest : public ::testing::Test {
   std::shared_ptr<ob::VideoStreamProfile> color_profile_;
 };
 
+TEST(GpuImagePipelineOptions, NoiseFilterStaysTheSdksUnlessAskedFor) {
+  EXPECT_FALSE(GpuImagePipeline::Options{}.speckle_filter);
+  EXPECT_TRUE(GpuImagePipeline::Options{}.depth_alignment);
+  EXPECT_TRUE(GpuImagePipeline::Options{}.color);
+}
+
 TEST_F(GpuImagePipelineTest, DepthMatchesSdkAlignmentWithItsProfileAndStamp) {
   GpuImagePipeline::Options options;
   options.speckle = {256, 200};

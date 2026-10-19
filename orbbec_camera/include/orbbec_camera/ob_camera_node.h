@@ -1107,7 +1107,9 @@ class OBCameraNode {
   // SEAL GPU image pipeline: the parameters, then what is actually active
   // once the build, the GPU and the stream configuration have had a say.
   bool gpu_pipeline_ = false;
-  bool gpu_speckle_filter_ = true;
+  // Opt-in: the SDK's own noise filter stays the default until the GPU one
+  // is shown equivalent on the camera.
+  bool gpu_speckle_filter_ = false;
   bool gpu_depth_alignment_ = true;
   bool gpu_color_ = true;
   bool gpu_compare_ = false;

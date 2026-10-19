@@ -5010,7 +5010,7 @@ void OBCameraNode::getParameters() {
   setAndGetNodeParameter<int>(noise_removal_filter_min_diff_, "noise_removal_filter_min_diff", -1);
   setAndGetNodeParameter<int>(noise_removal_filter_max_size_, "noise_removal_filter_max_size", -1);
   setAndGetNodeParameter<bool>(gpu_pipeline_, "gpu_pipeline", false);
-  setAndGetNodeParameter<bool>(gpu_speckle_filter_, "gpu_speckle_filter", true);
+  setAndGetNodeParameter<bool>(gpu_speckle_filter_, "gpu_speckle_filter", false);
   setAndGetNodeParameter<bool>(gpu_depth_alignment_, "gpu_depth_alignment", true);
   setAndGetNodeParameter<bool>(gpu_color_, "gpu_color", true);
   setAndGetNodeParameter<bool>(gpu_compare_, "gpu_compare", false);

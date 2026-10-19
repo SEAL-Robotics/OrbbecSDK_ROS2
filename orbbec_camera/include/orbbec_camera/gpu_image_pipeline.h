@@ -39,7 +39,7 @@ namespace orbbec_camera {
 class GpuImagePipeline {
  public:
   struct Options {
-    bool speckle_filter = true;
+    bool speckle_filter = false;
     bool depth_alignment = true;
     bool color = true;
     bool compare = false;
