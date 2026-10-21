@@ -8,7 +8,7 @@ from launch_ros.descriptions import ComposableNode
 
 
 # SEAL: launch-only arguments, not node parameters.
-CONTAINER_ARGS = {'use_intra_process_comms', 'container_executable'}
+CONTAINER_ARGS = {'use_intra_process_comms', 'container_executable', 'container_thread_num'}
 
 OPTIONAL_BOOLEAN_PARAMS = {
     'enable_hardware_noise_removal_filter',
@@ -306,6 +306,9 @@ def generate_launch_description():
         # driver's callbacks.
         DeclareLaunchArgument('use_intra_process_comms', default_value='false'),
         DeclareLaunchArgument('container_executable', default_value='component_container'),
+        # SEAL: executor threads of component_container_mt; 0 keeps its one
+        # per core. More than the cores refuses the parameter, so it is capped.
+        DeclareLaunchArgument('container_thread_num', default_value='0'),
         DeclareLaunchArgument('gpu_speckle_filter', default_value='false'),
         DeclareLaunchArgument('gpu_depth_alignment', default_value='true'),
         DeclareLaunchArgument('gpu_color', default_value='true'),
@@ -382,6 +385,12 @@ def generate_launch_description():
     def get_params(context, args):
         return [load_parameters(context, args)]
 
+    def container_parameters(context):
+        threads = int(LaunchConfiguration("container_thread_num").perform(context) or 0)
+        if threads <= 0:
+            return []
+        return [{"thread_num": min(threads, os.cpu_count() or 1)}]
+
     def create_node_action(context, args):
         params = get_params(context, args)
         ros_distro = os.environ.get("ROS_DISTRO", "humble")
@@ -405,6 +414,7 @@ def generate_launch_description():
                         namespace="",
                         package="rclcpp_components",
                         executable=LaunchConfiguration("container_executable"),
+                        parameters=container_parameters(context),
                         composable_node_descriptions=[
                             ComposableNode(
                                 package="orbbec_camera",
